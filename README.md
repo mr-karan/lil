@@ -115,8 +115,8 @@ server {
     listen 80;
     server_name lil.io;
 
-    # Block access to admin interface
-    location /admin {
+    # Block access to admin interface and API
+    location ~ ^/(admin|api) {
         return 403;
     }
 
