@@ -97,6 +97,39 @@
             </tbody>
           </table>
         </div>
+
+        <!-- Pagination -->
+        <div class="flex justify-between items-center mt-6">
+          <div class="text-sm text-base-content/70">
+            Showing {{ filteredUrls.length ? (currentPage - 1) * perPage + 1 : 0 }}
+            to {{ Math.min(currentPage * perPage, totalUrls) }}
+            of {{ totalUrls }} entries
+          </div>
+          <div class="join">
+            <button
+              class="join-item btn"
+              :class="{ 'btn-disabled': currentPage === 1 }"
+              :disabled="currentPage === 1"
+              @click="changePage(currentPage - 1)"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+              </svg>
+              Previous
+            </button>
+            <button
+              class="join-item btn"
+              :class="{ 'btn-disabled': currentPage * perPage >= totalUrls }"
+              :disabled="currentPage * perPage >= totalUrls"
+              @click="changePage(currentPage + 1)"
+            >
+              Next
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -106,11 +139,11 @@
 import { ref, onMounted, computed } from 'vue'
 
 const urls = ref([])
+const searchQuery = ref('')
 const currentPage = ref(1)
 const perPage = ref(20)
 const totalUrls = ref(0)
-const searchQuery = ref('')
-const allUrls = ref([])
+const loading = ref(false)
 
 const filteredUrls = computed(() => {
   if (!searchQuery.value) return urls.value
@@ -118,11 +151,13 @@ const filteredUrls = computed(() => {
   const query = searchQuery.value.toLowerCase()
   return urls.value.filter(url =>
     url.short_code.toLowerCase().includes(query) ||
-    url.url.toLowerCase().includes(query)
+    url.url.toLowerCase().includes(query) ||
+    (url.title && url.title.toLowerCase().includes(query))
   )
 })
 
 async function fetchUrls(page = 1) {
+  loading.value = true
   try {
     const response = await fetch(`/api/v1/urls?page=${page}&per_page=${perPage.value}`)
     const data = await response.json()
@@ -130,10 +165,29 @@ async function fetchUrls(page = 1) {
     if (data.status === 'success') {
       urls.value = data.data.urls
       totalUrls.value = data.data.count
+      currentPage.value = data.data.page
     }
   } catch (error) {
     console.error('Error fetching URLs:', error)
+  } finally {
+    loading.value = false
   }
+}
+
+function changePage(page) {
+  // Calculate total pages
+  const totalPages = Math.ceil(totalUrls.value / perPage.value)
+
+  // Validate page number
+  if (page < 1 || page > totalPages) return
+
+  currentPage.value = page
+  fetchUrls(page)
+}
+
+function handlePerPageChange() {
+  currentPage.value = 1 // Reset to first page when changing items per page
+  fetchUrls(1)
 }
 
 function formatDate(dateString) {
@@ -182,27 +236,13 @@ async function deleteUrl(shortCode) {
     const response = await fetch(`/api/v1/urls/${shortCode}`, {
       method: 'DELETE',
     })
-
-    if (response.ok) {
-      // Refresh the URLs list
+    if (response.status === 204) {
+      // Refresh the current page
       fetchUrls(currentPage.value)
-    } else {
-      alert('Failed to delete URL')
     }
   } catch (error) {
     console.error('Error deleting URL:', error)
-    alert('Error deleting URL')
   }
-}
-
-function handlePerPageChange() {
-  currentPage.value = 1 // Reset to first page
-  fetchUrls(1)
-}
-
-function changePage(page) {
-  currentPage.value = page
-  fetchUrls(page)
 }
 
 onMounted(() => {
