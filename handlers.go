@@ -8,16 +8,18 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/mileusna/useragent"
 	"github.com/mr-karan/lil/internal/analytics"
 	"github.com/mr-karan/lil/internal/metrics"
 	"github.com/mr-karan/lil/internal/store"
 )
 
 type shortenURLRequest struct {
-	URL          string `json:"url"`
-	Title        string `json:"title,omitempty"`
-	Slug         string `json:"slug,omitempty"`
-	ExpiryInSecs *int64 `json:"expiry_in_secs,omitempty"`
+	URL          string            `json:"url"`
+	Title        string            `json:"title,omitempty"`
+	Slug         string            `json:"slug,omitempty"`
+	ExpiryInSecs *int64            `json:"expiry_in_secs,omitempty"`
+	DeviceURLs   map[string]string `json:"device_urls,omitempty"` // platform -> url mapping
 }
 
 // httpResp represents the structure of the JSON response envelope
@@ -35,33 +37,30 @@ func (app *App) sendResponse(w http.ResponseWriter, data interface{}) {
 		app.sendErrorResponse(w, "Internal Server Error.", http.StatusInternalServerError, nil)
 		return
 	}
-
 	w.Write(out)
 }
 
-// sendErrorResponse sends a JSON error envelope to the HTTP response.
+// sendErrorResponse sends an error response to the HTTP response.
 func (app *App) sendErrorResponse(w http.ResponseWriter, message string, code int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
-
-	resp := httpResp{Status: "error",
-		Message: message,
-		Data:    data}
-	out, _ := json.Marshal(resp)
+	out, err := json.Marshal(httpResp{Status: "error", Message: message, Data: data})
+	if err != nil {
+		app.logger.Error("Failed to marshal error response", "error", err)
+		return
+	}
 	w.Write(out)
 }
 
 func (app *App) handleIndex(w http.ResponseWriter, r *http.Request) {
-	app.sendResponse(w, "Welcome to lil")
+	app.sendResponse(w, map[string]interface{}{
+		"version": buildString,
+	})
 }
 
 func (app *App) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*2)
-	defer cancel()
-
-	if err := app.store.Ping(ctx); err != nil {
-		app.logger.Error("Health check failed", "error", err)
-		app.sendErrorResponse(w, "Service Unhealthy", http.StatusServiceUnavailable, nil)
+	if err := app.store.Ping(context.TODO()); err != nil {
+		app.sendErrorResponse(w, "Database is not healthy", http.StatusServiceUnavailable, nil)
 		return
 	}
 	app.sendResponse(w, "healthy")
@@ -88,8 +87,8 @@ func (app *App) handleShortenURL(w http.ResponseWriter, r *http.Request) {
 		expiry = time.Duration(*req.ExpiryInSecs) * time.Second
 	}
 
-	// Call store method to create short URL
-	shortCode, err := app.store.CreateShortURL(context.TODO(), req.URL, req.Title, req.Slug, expiry)
+	// Call store method to create short URL with device URLs
+	shortCode, err := app.store.CreateShortURL(context.TODO(), req.URL, req.Title, req.Slug, expiry, req.DeviceURLs)
 	if err != nil {
 		app.logger.Error("Failed to create short URL", "error", err, "url", req.URL)
 		metrics.URLsShortenedTotal.Inc()
@@ -104,7 +103,7 @@ func (app *App) handleShortenURL(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (app *App) handleDeleteURL(w http.ResponseWriter, r *http.Request) {
+func (app *App) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	// Extract shortCode from path
 	shortCode := r.PathValue("shortCode")
 	if shortCode == "" {
@@ -112,20 +111,66 @@ func (app *App) handleDeleteURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete URL from store
-	if err := app.store.DeleteURL(context.TODO(), shortCode); err != nil {
+	// Get URL data from store
+	urlData, err := app.store.GetRedirectData(context.TODO(), shortCode)
+	if err != nil {
 		if err == store.ErrNotExist {
-			metrics.URLsDeletedTotal.Inc()
+			metrics.RedirectFailuresTotal.Inc()
 			app.sendErrorResponse(w, "URL not found", http.StatusNotFound, nil)
 			return
 		}
-		app.logger.Error("Failed to delete URL", "error", err, "shortCode", shortCode)
+		app.logger.Error("Failed to get URL data", "error", err, "shortCode", shortCode)
 		app.sendErrorResponse(w, "Internal server error", http.StatusInternalServerError, nil)
 		return
 	}
 
-	// Return success with no content
-	w.WriteHeader(http.StatusNoContent)
+	// Parse User-Agent
+	ua := useragent.Parse(r.UserAgent())
+	targetURL := urlData.URL // default URL
+
+	// Check for device-specific URLs
+	if urlData.DeviceURLs != nil {
+		// Try to match platform
+		switch {
+		case ua.IsAndroid():
+			if deviceURL, ok := urlData.DeviceURLs["android"]; ok {
+				targetURL = deviceURL.URL
+			}
+		case ua.IsIOS():
+			if deviceURL, ok := urlData.DeviceURLs["ios"]; ok {
+				targetURL = deviceURL.URL
+			}
+		case ua.IsMacOS():
+			if deviceURL, ok := urlData.DeviceURLs["macos"]; ok {
+				targetURL = deviceURL.URL
+			}
+		default:
+			// Web/Desktop
+			if deviceURL, ok := urlData.DeviceURLs["web"]; ok {
+				targetURL = deviceURL.URL
+			}
+		}
+	}
+
+	metrics.RedirectsTotal.Inc()
+	if app.analytics != nil {
+		app.analytics.Track(analytics.Event{
+			Name:       "pageview",
+			Domain:     r.Host,
+			URL:        fmt.Sprintf("%s/%s", ko.String("app.public_url"), shortCode),
+			Referrer:   r.Header.Get("Referer"),
+			UserAgent:  r.UserAgent(),
+			RemoteAddr: r.RemoteAddr,
+			Timestamp:  time.Now().UTC().Format(time.RFC3339),
+			ShortCode:  shortCode,
+			TargetURL:  targetURL,
+		})
+	}
+
+	// Ensure browsers don't cache the redirect response
+	w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
+	w.Header().Set("Location", targetURL)
+	w.WriteHeader(http.StatusFound)
 }
 
 func (app *App) handleGetURLs(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +210,7 @@ func (app *App) handleGetURLs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (app *App) handleRedirect(w http.ResponseWriter, r *http.Request) {
+func (app *App) handleDeleteURL(w http.ResponseWriter, r *http.Request) {
 	// Extract shortCode from path
 	shortCode := r.PathValue("shortCode")
 	if shortCode == "" {
@@ -173,38 +218,17 @@ func (app *App) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get URL data from store
-	urlData, err := app.store.GetRedirectData(context.TODO(), shortCode)
-	if err != nil {
+	// Delete URL from store
+	if err := app.store.DeleteURL(context.TODO(), shortCode); err != nil {
 		if err == store.ErrNotExist {
-			metrics.RedirectFailuresTotal.Inc()
 			app.sendErrorResponse(w, "URL not found", http.StatusNotFound, nil)
 			return
 		}
-		app.logger.Error("Failed to get URL data", "error", err, "shortCode", shortCode)
+		app.logger.Error("Failed to delete URL", "error", err, "shortCode", shortCode)
 		app.sendErrorResponse(w, "Internal server error", http.StatusInternalServerError, nil)
 		return
 	}
 
-	metrics.RedirectsTotal.Inc()
-	if app.analytics != nil {
-		app.analytics.Track(analytics.Event{
-			Name:       "pageview",
-			Domain:     r.Host,
-			URL:        fmt.Sprintf("%s/%s", ko.String("app.public_url"), shortCode),
-			Referrer:   r.Header.Get("Referer"),
-			UserAgent:  r.UserAgent(),
-			RemoteAddr: r.RemoteAddr,
-			Timestamp:  time.Now().UTC().Format(time.RFC3339),
-			ShortCode:  shortCode,
-			TargetURL:  urlData.URL,
-		})
-	}
-
-	// Ensure browsers don't cache the redirect response to prevent stale redirects
-	// if the target URL is updated or the short link expires
-	w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
-
-	w.Header().Set("Location", urlData.URL)
-	w.WriteHeader(http.StatusFound)
+	// Return success with no content
+	w.WriteHeader(http.StatusNoContent)
 }

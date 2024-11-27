@@ -58,6 +58,61 @@
                   />
                 </div>
 
+                <!-- Platform-specific URLs -->
+                <div class="form-control">
+                  <label class="label cursor-pointer select-text">
+                    <span class="label-text font-medium">Platform-specific URLs</span>
+                    <span class="label-text-alt text-base-content/60">Optional: Set different URLs for different platforms</span>
+                  </label>
+
+                  <!-- Android URL -->
+                  <div class="mt-2">
+                    <label class="label">
+                      <span class="label-text">Android URL</span>
+                      <span class="label-text-alt text-base-content/60">For Android devices</span>
+                    </label>
+                    <input
+                      type="url"
+                      v-model="formData.device_urls.android"
+                      placeholder="URL for Android devices (e.g., Play Store link)"
+                      class="input input-bordered w-full"
+                    />
+                  </div>
+
+                  <!-- iOS URL -->
+                  <div class="mt-2">
+                    <label class="label">
+                      <span class="label-text">iOS URL</span>
+                      <span class="label-text-alt text-base-content/60">For iOS devices</span>
+                    </label>
+                    <input
+                      type="url"
+                      v-model="formData.device_urls.ios"
+                      placeholder="URL for iOS devices (e.g., App Store link)"
+                      class="input input-bordered w-full"
+                    />
+                  </div>
+
+                  <!-- macOS URL -->
+                  <div class="mt-2">
+                    <label class="label">
+                      <span class="label-text">macOS URL</span>
+                      <span class="label-text-alt text-base-content/60">For macOS devices</span>
+                    </label>
+                    <input
+                      type="url"
+                      v-model="formData.device_urls.macos"
+                      placeholder="URL for macOS devices (e.g., Mac App Store link)"
+                      class="input input-bordered w-full"
+                    />
+                  </div>
+
+                  <!-- Note about web fallback -->
+                  <div class="mt-4 text-sm text-base-content/70">
+                    <p>Note: The main URL above will be used as the default (web) fallback for all other platforms.</p>
+                  </div>
+                </div>
+
                 <!-- Title with icon -->
                 <div class="form-control">
                   <label class="label cursor-pointer select-text">
@@ -140,13 +195,19 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref } from 'vue'
 
-const formData = reactive({
+const formData = ref({
   url: '',
   slug: '',
   title: '',
-  expiry_in_secs: null
+  expiry_in_secs: null,
+  device_urls: {
+    android: '',
+    ios: '',
+    macos: '',
+    // web URL is the main URL
+  }
 })
 
 const shortUrl = ref('')
@@ -165,7 +226,7 @@ async function handleSubmit() {
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(formData),
+      body: JSON.stringify(formData.value),
     })
 
     const data = await response.json()
@@ -173,9 +234,9 @@ async function handleSubmit() {
       // Get public URL from API response metadata
       shortUrl.value = `${data.data.public_url}/${data.data.short_code}`
       // Reset form except URL
-      formData.slug = ''
-      formData.title = ''
-      formData.expiry_in_secs = ''
+      formData.value.slug = ''
+      formData.value.title = ''
+      formData.value.expiry_in_secs = ''
     } else {
       error.value = data.message || 'Failed to create short URL'
     }

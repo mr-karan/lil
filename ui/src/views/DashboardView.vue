@@ -1,21 +1,21 @@
 <template>
-  <div class="container mx-auto px-4 py-8">
+  <div class="container-fluid px-4 py-8 max-w-[95%] mx-auto">
     <div class="card bg-base-100 shadow-xl">
       <div class="card-body">
         <h2 class="card-title mb-4">URL Dashboard</h2>
 
         <div class="flex justify-between items-center mb-4">
           <div class="form-control">
-            <input 
-              type="text" 
-              placeholder="Search URLs..." 
+            <input
+              type="text"
+              placeholder="Search URLs..."
               class="input input-bordered w-64"
               v-model="searchQuery"
             />
           </div>
           <div class="form-control">
-            <select 
-              class="select select-bordered" 
+            <select
+              class="select select-bordered"
               v-model="perPage"
               @change="handlePerPageChange"
             >
@@ -32,59 +32,70 @@
           <table class="table">
             <thead>
               <tr>
-                <th>Short Code</th>
-                <th>Original URL</th>
-                <th>Title</th>
-                <th>Created At</th>
-                <th>Expires At</th>
-                <th>Actions</th>
+                <th class="w-24">Short Code</th>
+                <th class="w-1/4">Original URL</th>
+                <th class="w-32">Title</th>
+                <th class="w-1/3">Device URLs</th>
+                <th class="w-40">Created At</th>
+                <th class="w-40">Expires At</th>
+                <th class="w-24">Actions</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="url in filteredUrls" :key="url.short_code">
-                <td>{{ url.short_code }}</td>
-                <td class="max-w-xs truncate">{{ url.url }}</td>
+                <td class="whitespace-nowrap">{{ url.short_code }}</td>
+                <td class="break-all">
+                  <a :href="url.url" target="_blank" class="link link-primary">{{ url.url }}</a>
+                </td>
                 <td>{{ url.title || '-' }}</td>
-                <td>{{ formatDate(url.created_at) }}</td>
-                <td>{{ url.expires_at ? formatDate(url.expires_at) : 'Never' }}</td>
-                <td class="flex gap-2">
-                  <button class="btn btn-sm" @click="copyShortUrl(url.short_code)">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                    </svg>
-                  </button>
-                  <button class="btn btn-sm btn-error" @click="deleteUrl(url.short_code)">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  </button>
+                <td>
+                  <div v-if="url.device_urls" class="space-y-2">
+                    <div v-if="url.device_urls.android" class="text-xs">
+                      <span class="font-medium">Android:</span>
+                      <a :href="url.device_urls.android.url" target="_blank" class="link link-primary break-all">
+                        {{ url.device_urls.android.url }}
+                      </a>
+                    </div>
+                    <div v-if="url.device_urls.ios" class="text-xs">
+                      <span class="font-medium">iOS:</span>
+                      <a :href="url.device_urls.ios.url" target="_blank" class="link link-primary break-all">
+                        {{ url.device_urls.ios.url }}
+                      </a>
+                    </div>
+                    <div v-if="url.device_urls.macos" class="text-xs">
+                      <span class="font-medium">macOS:</span>
+                      <a :href="url.device_urls.macos.url" target="_blank" class="link link-primary break-all">
+                        {{ url.device_urls.macos.url }}
+                      </a>
+                    </div>
+                    <div class="text-xs text-base-content/70">
+                      <span class="font-medium">Web:</span>
+                      <a :href="url.url" target="_blank" class="link link-primary break-all">
+                        {{ url.url }}
+                      </a>
+                    </div>
+                  </div>
+                  <span v-else>-</span>
+                </td>
+                <td class="whitespace-nowrap">{{ formatDate(url.created_at) }}</td>
+                <td class="whitespace-nowrap">{{ url.expires_at ? formatDate(url.expires_at) : 'Never' }}</td>
+                <td class="whitespace-nowrap">
+                  <div class="flex gap-2">
+                    <button class="btn btn-sm" @click="copyShortUrl(url.short_code)">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                    </button>
+                    <button class="btn btn-sm btn-error" @click="deleteUrl(url.short_code)">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                    </button>
+                  </div>
                 </td>
               </tr>
             </tbody>
           </table>
-        </div>
-
-        <!-- Pagination -->
-        <div class="flex justify-between items-center mt-4">
-          <span class="text-sm">
-            Showing {{ filteredUrls.length ? (currentPage - 1) * perPage + 1 : 0 }} to {{ Math.min(currentPage * perPage, totalUrls) }} of {{ totalUrls }} entries
-          </span>
-          <div class="join">
-            <button 
-              class="join-item btn" 
-              :disabled="currentPage === 1"
-              @click="changePage(currentPage - 1)"
-            >
-              Previous
-            </button>
-            <button 
-              class="join-item btn" 
-              :disabled="(currentPage * perPage) >= totalUrls"
-              @click="changePage(currentPage + 1)"
-            >
-              Next
-            </button>
-          </div>
         </div>
       </div>
     </div>
@@ -103,9 +114,9 @@ const allUrls = ref([])
 
 const filteredUrls = computed(() => {
   if (!searchQuery.value) return urls.value
-  
+
   const query = searchQuery.value.toLowerCase()
-  return urls.value.filter(url => 
+  return urls.value.filter(url =>
     url.short_code.toLowerCase().includes(query) ||
     url.url.toLowerCase().includes(query)
   )
@@ -115,7 +126,7 @@ async function fetchUrls(page = 1) {
   try {
     const response = await fetch(`/api/v1/urls?page=${page}&per_page=${perPage.value}`)
     const data = await response.json()
-    
+
     if (data.status === 'success') {
       urls.value = data.data.urls
       totalUrls.value = data.data.count

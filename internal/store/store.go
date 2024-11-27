@@ -101,7 +101,16 @@ func initDB(db *sql.DB) error {
 			title TEXT,
 			created_at DATETIME NOT NULL,
 			expires_at DATETIME
-		)
+		);
+
+		CREATE TABLE IF NOT EXISTS device_urls (
+			short_code TEXT,
+			platform TEXT CHECK(platform IN ('android', 'ios', 'macos', 'web')),
+			url TEXT NOT NULL,
+			created_at DATETIME NOT NULL,
+			FOREIGN KEY (short_code) REFERENCES urls(short_code) ON DELETE CASCADE,
+			PRIMARY KEY (short_code, platform)
+		);
 	`); err != nil {
 		return err
 	}
@@ -250,57 +259,117 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
-func (s *Store) CreateShortURL(ctx context.Context, url, title string, slug string, expiry time.Duration) (string, error) {
+func (s *Store) CreateShortURL(ctx context.Context, url string, title string, slug string, expiry time.Duration, deviceURLs map[string]string) (string, error) {
 	var shortCode string
+
 	if slug != "" {
-		s.mu.RLock()
-		_, exists := s.cache[slug]
-		s.mu.RUnlock()
-		if exists {
-			return "", errors.New("slug already exists")
-		}
 		shortCode = slug
 	} else {
-		shortCode = generateRandomString(s.shortURLLen)
+		// Try to generate a unique short code
 		for {
+			shortCode = generateRandomString(s.shortURLLen)
 			s.mu.RLock()
 			_, exists := s.cache[shortCode]
 			s.mu.RUnlock()
 			if !exists {
 				break
 			}
-			shortCode = generateRandomString(6)
 		}
 	}
 
-	createdAt := time.Now()
+	// Check if shortCode already exists
+	s.mu.RLock()
+	_, exists := s.cache[shortCode]
+	s.mu.RUnlock()
+	if exists {
+		return "", fmt.Errorf("short code already exists")
+	}
+
+	// Calculate expiry time if provided
+	var expiresAt *time.Time
+	if expiry > 0 {
+		t := time.Now().Add(expiry)
+		expiresAt = &t
+	}
+
+	// Create URL data
 	urlData := models.URLData{
 		URL:       url,
 		Title:     title,
 		ShortCode: shortCode,
-		CreatedAt: createdAt,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: expiresAt,
 	}
 
-	if expiry > 0 {
-		t := createdAt.Add(expiry)
-		urlData.ExpiresAt = &t
-	}
+	// If we have device URLs, we need to write everything immediately to maintain consistency
+	if len(deviceURLs) > 0 {
+		// Start a transaction
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return "", fmt.Errorf("begin transaction: %w", err)
+		}
+		defer tx.Rollback()
 
-	// Update cache immediately
-	s.mu.Lock()
-	s.cache[shortCode] = urlData
-	metrics.URLsStoredGauge.Set(float64(len(s.cache)))
-	s.mu.Unlock()
+		// Insert main URL
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO urls (short_code, url, title, created_at, expires_at)
+			VALUES (?, ?, ?, ?, ?)
+		`, shortCode, url, title, urlData.CreatedAt, expiresAt)
+		if err != nil {
+			return "", fmt.Errorf("insert url: %w", err)
+		}
 
-	// Add to write buffer
-	s.bufMu.Lock()
-	s.writeBuf = append(s.writeBuf, urlData)
-	shouldFlush := len(s.writeBuf) >= s.bufferSize
-	s.bufMu.Unlock()
+		// Insert device URLs
+		urlData.DeviceURLs = make(map[string]models.DeviceURLData)
+		for platform, deviceURL := range deviceURLs {
+			if platform != "android" && platform != "ios" && platform != "macos" && platform != "web" {
+				continue // Skip invalid platforms
+			}
+			// Skip empty URLs
+			if deviceURL == "" {
+				continue
+			}
+			deviceURLData := models.DeviceURLData{
+				URL:       deviceURL,
+				Platform:  platform,
+				CreatedAt: time.Now().UTC(),
+			}
+			_, err = tx.ExecContext(ctx, `
+				INSERT INTO device_urls (short_code, platform, url, created_at)
+				VALUES (?, ?, ?, ?)
+			`, shortCode, platform, deviceURL, deviceURLData.CreatedAt)
+			if err != nil {
+				return "", fmt.Errorf("insert device url: %w", err)
+			}
+			urlData.DeviceURLs[platform] = deviceURLData
+		}
 
-	// Trigger flush if buffer is full
-	if shouldFlush {
-		s.triggerFlush()
+		// Commit transaction
+		if err := tx.Commit(); err != nil {
+			return "", fmt.Errorf("commit transaction: %w", err)
+		}
+
+		// Update cache
+		s.mu.Lock()
+		s.cache[shortCode] = urlData
+		metrics.URLsStoredGauge.Set(float64(len(s.cache)))
+		s.mu.Unlock()
+	} else {
+		// No device URLs, use the buffer as before
+		s.bufMu.Lock()
+		s.writeBuf = append(s.writeBuf, urlData)
+		if len(s.writeBuf) >= s.bufferSize {
+			// Buffer is full, flush it
+			s.flushChan <- s.writeBuf
+			s.writeBuf = make([]models.URLData, 0, s.bufferSize)
+		}
+		s.bufMu.Unlock()
+
+		// Update cache immediately
+		s.mu.Lock()
+		s.cache[shortCode] = urlData
+		metrics.URLsStoredGauge.Set(float64(len(s.cache)))
+		s.mu.Unlock()
 	}
 
 	return shortCode, nil
@@ -326,6 +395,33 @@ func (s *Store) GetRedirectData(ctx context.Context, shortCode string) (models.U
 			s.logger.Error("failed to delete expired url", "error", err)
 		}
 		return models.URLData{}, ErrNotExist
+	}
+
+	// Load device-specific URLs if not already loaded
+	if urlData.DeviceURLs == nil {
+		rows, err := s.db.QueryContext(ctx, `SELECT platform, url, created_at FROM device_urls WHERE short_code = ?`, shortCode)
+		if err != nil {
+			s.logger.Error("failed to load device urls", "error", err)
+			return urlData, nil
+		}
+		defer rows.Close()
+
+		deviceURLs := make(map[string]models.DeviceURLData)
+		for rows.Next() {
+			var deviceURL models.DeviceURLData
+			err := rows.Scan(&deviceURL.Platform, &deviceURL.URL, &deviceURL.CreatedAt)
+			if err != nil {
+				s.logger.Error("failed to scan device url", "error", err)
+				continue
+			}
+			deviceURLs[deviceURL.Platform] = deviceURL
+		}
+		urlData.DeviceURLs = deviceURLs
+
+		// Update cache with device URLs
+		s.mu.Lock()
+		s.cache[shortCode] = urlData
+		s.mu.Unlock()
 	}
 
 	return urlData, nil
@@ -358,13 +454,21 @@ func (s *Store) DeleteURL(ctx context.Context, shortCode string) error {
 
 func (s *Store) GetURLs(ctx context.Context, page, perPage int64) ([]models.URLData, int64, error) {
 	offset := (page - 1) * perPage
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT short_code, url, title, created_at, expires_at
+
+	// Get total count
+	var total int64
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM urls`).Scan(&total)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Get paginated URLs
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT short_code, url, title, created_at, expires_at
 		FROM urls
-		WHERE expires_at IS NULL OR expires_at > datetime('now')
 		ORDER BY created_at DESC
-		LIMIT ? OFFSET ?`,
-		perPage, offset)
+		LIMIT ? OFFSET ?
+	`, perPage, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -381,14 +485,32 @@ func (s *Store) GetURLs(ctx context.Context, page, perPage int64) ([]models.URLD
 		if expiresAt.Valid {
 			urlData.ExpiresAt = &expiresAt.Time
 		}
+
+		// Get device URLs for this short code
+		deviceRows, err := s.db.QueryContext(ctx, `
+			SELECT platform, url, created_at
+			FROM device_urls
+			WHERE short_code = ?
+		`, urlData.ShortCode)
+		if err != nil {
+			s.logger.Error("failed to get device urls", "error", err, "shortCode", urlData.ShortCode)
+			continue
+		}
+		defer deviceRows.Close()
+
+		urlData.DeviceURLs = make(map[string]models.DeviceURLData)
+		for deviceRows.Next() {
+			var deviceURL models.DeviceURLData
+			err := deviceRows.Scan(&deviceURL.Platform, &deviceURL.URL, &deviceURL.CreatedAt)
+			if err != nil {
+				s.logger.Error("failed to scan device url", "error", err)
+				continue
+			}
+			urlData.DeviceURLs[deviceURL.Platform] = deviceURL
+		}
+		deviceRows.Close() // Close before next iteration
+
 		urls = append(urls, urlData)
-	}
-	// Get total count
-	var total int64
-	err = s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM urls WHERE expires_at IS NULL OR expires_at > datetime('now')`).Scan(&total)
-	if err != nil {
-		return nil, 0, err
 	}
 
 	return urls, total, rows.Err()
