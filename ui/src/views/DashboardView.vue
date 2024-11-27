@@ -19,10 +19,11 @@
               v-model="perPage"
               @change="handlePerPageChange"
             >
-              <option :value="10">10 per page</option>
               <option :value="20">20 per page</option>
               <option :value="50">50 per page</option>
               <option :value="100">100 per page</option>
+              <option :value="500">500 per page</option>
+              <option :value="1000">1000 per page</option>
             </select>
           </div>
         </div>
