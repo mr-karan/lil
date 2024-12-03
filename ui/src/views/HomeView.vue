@@ -138,7 +138,7 @@
                     <span v-if="formData.expiry_in_secs" class="badge badge-primary">Active</span>
                   </label>
                   <select v-model="formData.expiry_in_secs" class="select select-bordered w-full">
-                    <option value="">Never expires</option>
+                    <option :value="null">Never expires</option>
                     <option :value="3600">1 Hour</option>
                     <option :value="86400">1 Day</option>
                     <option :value="604800">1 Week</option>
