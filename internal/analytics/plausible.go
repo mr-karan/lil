@@ -68,7 +68,7 @@ func (p *PlausibleDispatcher) Send(ctx context.Context, evt Event) error {
 	}
 
 	req.Header.Set("User-Agent", evt.UserAgent)
-	req.Header.Set("X-Forwarded-For", evt.RemoteAddr)
+	req.Header.Set("X-Forwarded-For", evt.UserIP)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.client.Do(req)
