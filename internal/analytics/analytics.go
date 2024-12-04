@@ -70,22 +70,51 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 func initializeProvider(name string, config map[string]interface{}, logger *slog.Logger) (Dispatcher, error) {
 	switch name {
 	case "plausible":
+		endpoint, ok := config["endpoint"].(string)
+		if !ok || endpoint == "" {
+			return nil, fmt.Errorf("plausible endpoint is required")
+		}
+		timeout, ok := config["timeout"].(int64)
+		if !ok || timeout == 0 {
+			return nil, fmt.Errorf("plausible timeout is required")
+		}
 		cfg := PlausibleConfig{
-			Endpoint: config["endpoint"].(string),
-			Timeout:  time.Duration(config["timeout"].(int64)) * time.Second,
+			Endpoint: endpoint,
+			Timeout:  time.Duration(timeout) * time.Second,
 		}
 		return NewPlausibleDispatcher(cfg, logger)
 	case "matomo":
+		trackingURL, ok := config["tracking_url"].(string)
+		if !ok || trackingURL == "" {
+			return nil, fmt.Errorf("matomo tracking_url is required")
+		}
+		siteID, ok := config["site_id"].(int64)
+		if !ok || siteID == 0 {
+			return nil, fmt.Errorf("matomo site_id is required")
+		}
+		timeout, ok := config["timeout"].(int64)
+		if !ok || timeout == 0 {
+			return nil, fmt.Errorf("matomo timeout is required")
+		}
+		authToken, _ := config["auth_token"].(string)
 		cfg := MatomoConfig{
-			TrackingURL: config["tracking_url"].(string),
-			SiteID:      int(config["site_id"].(int64)),
-			AuthToken:   config["auth_token"].(string),
-			Timeout:     time.Duration(config["timeout"].(int64)) * time.Second,
+			TrackingURL: trackingURL,
+			SiteID:      int(siteID),
+			AuthToken:   authToken,
+			Timeout:     time.Duration(timeout) * time.Second,
 		}
 		return NewMatomoDispatcher(cfg, logger)
 	case "accesslog":
 		return NewAccessLogDispatcher(config, logger)
 	case "webhook":
+		endpoint, ok := config["endpoint"].(string)
+		if !ok || endpoint == "" {
+			return nil, fmt.Errorf("webhook endpoint is required")
+		}
+		timeout, ok := config["timeout"].(int64)
+		if !ok || timeout == 0 {
+			return nil, fmt.Errorf("webhook timeout is required")
+		}
 		headers := make(map[string]string)
 		if h, ok := config["headers"].(map[string]interface{}); ok {
 			for k, v := range h {
@@ -95,8 +124,8 @@ func initializeProvider(name string, config map[string]interface{}, logger *slog
 			}
 		}
 		cfg := WebhookConfig{
-			Endpoint: config["endpoint"].(string),
-			Timeout:  time.Duration(config["timeout"].(int64)) * time.Second,
+			Endpoint: endpoint,
+			Timeout:  time.Duration(timeout) * time.Second,
 			Headers:  headers,
 		}
 		return NewWebhookDispatcher(cfg, logger)
