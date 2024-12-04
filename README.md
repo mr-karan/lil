@@ -5,6 +5,10 @@ Lil is a fast URL shortener built in Go, designed with scalability and extensibi
 ## Key Features
 
 - **Fast**: Uses in-memory cache alongside SQLite for high performance
+- **Platform-Specific Redirects**: Intelligently route users based on their device
+  - Custom redirects for iOS, Android, and macOS
+  - Fallback URLs for unsupported platforms
+  - Device detection using User-Agent headers
 - **Flexible Analytics**: Supports multiple analytics providers out of the box
   - Plausible Analytics integration
   - Access log provider for analysis with tools like GoAccess
