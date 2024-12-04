@@ -55,9 +55,10 @@ func (m *MatomoDispatcher) Send(ctx context.Context, evt Event) error {
 	params.Set("rec", "1")
 	params.Set("apiv", "1")
 
-	// Set URL and action name (page title)
-	params.Set("url", evt.TargetURL)
-	params.Set("action_name", fmt.Sprintf("Redirect: %s", evt.ShortCode))
+	// Set URL as the short URL (using configured public_url)
+	shortURL := fmt.Sprintf("%s/%s", evt.Domain, evt.ShortCode)
+	params.Set("url", shortURL)
+	params.Set("action_name", fmt.Sprintf("Redirect to: %s", evt.TargetURL))
 
 	// Event tracking
 	params.Set("e_c", "Shortlink")   // Category
