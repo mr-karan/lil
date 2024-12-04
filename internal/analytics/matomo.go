@@ -93,6 +93,13 @@ func (m *MatomoDispatcher) Send(ctx context.Context, evt Event) error {
 	// Add parameter to avoid receiving GIF image
 	params.Set("send_image", "0")
 
+	// Log all request parameters
+	m.logger.Info("sending matomo request",
+		"url", trackingURL,
+		"params", params,
+		"user_agent", evt.UserAgent,
+		"user_ip", evt.UserIP)
+
 	// Send request
 	resp, err := m.client.Do(req)
 	if err != nil {
