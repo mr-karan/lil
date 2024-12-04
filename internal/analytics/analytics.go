@@ -61,6 +61,7 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize provider %s: %w", providerName, err)
 		}
+		logger.Info("initialized analytics provider", "provider", providerName)
 		m.dispatchers = append(m.dispatchers, dispatcher)
 	}
 

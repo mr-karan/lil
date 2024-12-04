@@ -98,8 +98,17 @@ func (m *MatomoDispatcher) Send(ctx context.Context, evt Event) error {
 
 	// Check response
 	if resp.StatusCode >= 400 {
+		m.logger.Debug("matomo request failed",
+			"status_code", resp.StatusCode,
+			"url", evt.TargetURL,
+			"short_code", evt.ShortCode)
 		return fmt.Errorf("matomo request failed with status: %d", resp.StatusCode)
 	}
+
+	m.logger.Debug("matomo request successful",
+		"status_code", resp.StatusCode,
+		"url", evt.TargetURL,
+		"short_code", evt.ShortCode)
 
 	return nil
 }
