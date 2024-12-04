@@ -3,6 +3,7 @@ package analytics
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -101,7 +102,12 @@ func (m *MatomoDispatcher) Send(ctx context.Context, evt Event) error {
 
 	// Check response
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("matomo request failed with status: %d", resp.StatusCode)
+		// Read response body for error details
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("matomo request failed with status: %d, failed to read response body: %v", resp.StatusCode, err)
+		}
+		return fmt.Errorf("matomo request failed with status: %d, response: %s", resp.StatusCode, string(body))
 	}
 
 	return nil
