@@ -3,6 +3,7 @@ package analytics
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -90,6 +91,11 @@ func (m *MatomoDispatcher) Send(ctx context.Context, evt Event) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
+	// Log request parameters
+	m.logger.Debug("sending matomo request",
+		"tracking_url", trackingURL,
+		"params", params)
+
 	// Send request
 	resp, err := m.client.Do(req)
 	if err != nil {
@@ -97,19 +103,27 @@ func (m *MatomoDispatcher) Send(ctx context.Context, evt Event) error {
 	}
 	defer resp.Body.Close()
 
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %w", err)
+	}
+
 	// Check response
 	if resp.StatusCode >= 400 {
 		m.logger.Debug("matomo request failed",
 			"status_code", resp.StatusCode,
 			"url", evt.TargetURL,
-			"short_code", evt.ShortCode)
+			"short_code", evt.ShortCode,
+			"response_body", string(body))
 		return fmt.Errorf("matomo request failed with status: %d", resp.StatusCode)
 	}
 
 	m.logger.Debug("matomo request successful",
 		"status_code", resp.StatusCode,
 		"url", evt.TargetURL,
-		"short_code", evt.ShortCode)
+		"short_code", evt.ShortCode,
+		"response_body", string(body))
 
 	return nil
 }
