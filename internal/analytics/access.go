@@ -47,8 +47,9 @@ func (a *AccessLogDispatcher) formatLogEntry(evt Event) string {
 
 	// Construct the log entry in Combined Log Format
 	// %h %l %u %t "%r" %>s %b "%{Referer}i" "%{User-Agent}i"
-	logEntry := fmt.Sprintf("%s - - [%s] \"GET /%s HTTP/1.1\" 302 - \"%s\" \"%s\"\n",
+	logEntry := fmt.Sprintf("%s (%s) - - [%s] \"GET /%s HTTP/1.1\" 302 - \"%s\" \"%s\"\n",
 		evt.RemoteAddr,
+		evt.UserIP,
 		timestamp,
 		evt.ShortCode,
 		evt.Referrer,
