@@ -55,9 +55,10 @@ func (m *MatomoDispatcher) Send(ctx context.Context, evt Event) error {
 	params.Set("rec", "1")
 	params.Set("apiv", "1")
 
-	// Set URL and action name (page title)
-	params.Set("url", evt.TargetURL)
-	params.Set("action_name", fmt.Sprintf("Redirect: %s", evt.ShortCode))
+	// TODO: Make protocol configurable instead of hardcoding to https
+	shortURL := fmt.Sprintf("%s/%s", evt.Domain, evt.ShortCode)
+	params.Set("url", "https://"+shortURL)
+	params.Set("action_name", fmt.Sprintf("Redirect to: %s", evt.TargetURL))
 
 	// Event tracking
 	params.Set("e_c", "Shortlink")   // Category
@@ -88,6 +89,9 @@ func (m *MatomoDispatcher) Send(ctx context.Context, evt Event) error {
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+
+	// Add parameter to avoid receiving GIF image
+	params.Set("send_image", "0")
 
 	// Send request
 	resp, err := m.client.Do(req)
