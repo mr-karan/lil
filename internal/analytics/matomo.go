@@ -72,13 +72,12 @@ func (m *MatomoDispatcher) Send(ctx context.Context, evt Event) error {
 	// Generate random value to avoid caching
 	params.Set("rand", strconv.FormatInt(time.Now().UnixNano(), 10))
 
-	// Optional user info if available
-	if evt.RemoteAddr != "" {
-		// Only set if we have auth token since this requires authentication
-		if m.config.AuthToken != "" {
-			params.Set("cip", evt.RemoteAddr)
-			params.Set("token_auth", m.config.AuthToken)
+	// Set the client IP if auth token is available (required for IP tracking)
+	if m.config.AuthToken != "" {
+		if evt.UserIP != "" {
+			params.Set("cip", evt.UserIP)
 		}
+		params.Set("token_auth", m.config.AuthToken)
 	}
 
 	// Construct the final URL

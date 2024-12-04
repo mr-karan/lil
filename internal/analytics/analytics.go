@@ -14,6 +14,7 @@ type Event struct {
 	URL        string
 	Referrer   string
 	UserAgent  string
+	UserIP     string
 	RemoteAddr string
 	Timestamp  string
 	ShortCode  string
