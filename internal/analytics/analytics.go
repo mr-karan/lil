@@ -75,6 +75,14 @@ func initializeProvider(name string, config map[string]interface{}, logger *slog
 			Timeout:  time.Duration(config["timeout"].(int64)) * time.Second,
 		}
 		return NewPlausibleDispatcher(cfg, logger)
+	case "matomo":
+		cfg := MatomoConfig{
+			TrackingURL: config["tracking_url"].(string),
+			SiteID:      int(config["site_id"].(int64)),
+			AuthToken:   config["auth_token"].(string),
+			Timeout:     time.Duration(config["timeout"].(int64)) * time.Second,
+		}
+		return NewMatomoDispatcher(cfg, logger)
 	case "accesslog":
 		return NewAccessLogDispatcher(config, logger)
 	case "webhook":
