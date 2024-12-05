@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mileusna/useragent"
@@ -154,12 +155,26 @@ func (app *App) handleRedirect(w http.ResponseWriter, r *http.Request) {
 
 	metrics.RedirectsTotal.Inc()
 	if app.analytics != nil {
+		// Extract real IP address from headers
+		var userIP string
+		if cfIP := r.Header.Get("CF-Connecting-IP"); cfIP != "" {
+			userIP = cfIP
+		} else if fwdIP := r.Header.Get("X-Forwarded-For"); fwdIP != "" {
+			// Use the first IP in the chain which is typically the original client
+			if firstIP := strings.Split(fwdIP, ",")[0]; firstIP != "" {
+				userIP = strings.TrimSpace(firstIP)
+			}
+		} else {
+			userIP = r.RemoteAddr
+		}
+
 		app.analytics.Track(analytics.Event{
 			Name:       "pageview",
 			Domain:     r.Host,
 			URL:        fmt.Sprintf("%s/%s", ko.String("app.public_url"), shortCode),
 			Referrer:   r.Header.Get("Referer"),
 			UserAgent:  r.UserAgent(),
+			UserIP:     userIP,
 			RemoteAddr: r.RemoteAddr,
 			Timestamp:  time.Now().UTC().Format(time.RFC3339),
 			ShortCode:  shortCode,

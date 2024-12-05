@@ -61,6 +61,17 @@ enabled = true
 # Path to access log file
 file_path = "access.log"
 
+# Matomo Analytics integration
+[analytics.providers.matomo]
+# Matomo tracking endpoint URL (full URL including matomo.php)
+tracking_url = "https://your-matomo-domain.example/matomo.php"
+# Your Matomo site ID
+site_id = 1
+# Optional authentication token
+auth_token = "your-matomo-auth-token"
+# Request timeout in seconds
+timeout = 5
+
 # Webhook integration
 [analytics.providers.webhook]
 # Webhook endpoint URL
