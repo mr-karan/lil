@@ -8,7 +8,9 @@ import (
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/sqlite"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
+
+	"github.com/mr-karan/lil/migrations"
 )
 
 func runMigrations(db *sql.DB, migrationsPath string, logger *slog.Logger) error {
@@ -18,8 +20,14 @@ func runMigrations(db *sql.DB, migrationsPath string, logger *slog.Logger) error
 		return fmt.Errorf("could not create sqlite driver: %w", err)
 	}
 
-	m, err := migrate.NewWithDatabaseInstance(
-		fmt.Sprintf("file://%s", migrationsPath),
+	d, err := iofs.New(migrations.MigrationsFS, ".")
+	if err != nil {
+		return fmt.Errorf("could not create source driver: %w", err)
+	}
+
+	m, err := migrate.NewWithInstance(
+		"iofs",
+		d,
 		"sqlite",
 		driver,
 	)
