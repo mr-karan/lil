@@ -78,6 +78,11 @@ func New(cfg Conf, logger *slog.Logger) (*Store, error) {
 		workerDone:  make(chan struct{}),
 	}
 
+	// Run migrations after store is initialized
+	if err := runMigrations(db, "migrations", s.logger); err != nil {
+		return nil, fmt.Errorf("failed to run migrations: %w", err)
+	}
+
 	// Start single flush worker
 	go s.flushWorker()
 
@@ -93,29 +98,7 @@ func New(cfg Conf, logger *slog.Logger) (*Store, error) {
 }
 
 func initDB(db *sql.DB) error {
-	// Create tables
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS urls (
-			short_code TEXT PRIMARY KEY,
-			url TEXT NOT NULL,
-			title TEXT,
-			created_at DATETIME NOT NULL,
-			expires_at DATETIME
-		);
-
-		CREATE TABLE IF NOT EXISTS device_urls (
-			short_code TEXT,
-			platform TEXT CHECK(platform IN ('android', 'ios', 'macos', 'web')),
-			url TEXT NOT NULL,
-			created_at DATETIME NOT NULL,
-			FOREIGN KEY (short_code) REFERENCES urls(short_code) ON DELETE CASCADE,
-			PRIMARY KEY (short_code, platform)
-		);
-	`); err != nil {
-		return err
-	}
-
-	// Apply PRAGMA statements
+	// Apply PRAGMA statements first
 	if _, err := db.Exec(pragmas); err != nil {
 		return err
 	}
@@ -322,7 +305,7 @@ func (s *Store) CreateShortURL(ctx context.Context, url string, title string, sl
 		// Insert device URLs
 		urlData.DeviceURLs = make(map[string]models.DeviceURLData)
 		for platform, deviceURL := range deviceURLs {
-			if platform != "android" && platform != "ios" && platform != "macos" && platform != "web" {
+			if platform != "android" && platform != "ios" && platform != "web" {
 				continue // Skip invalid platforms
 			}
 			// Skip empty URLs
@@ -447,6 +430,81 @@ func (s *Store) DeleteURL(ctx context.Context, shortCode string) error {
 	s.mu.Lock()
 	delete(s.cache, shortCode)
 	metrics.URLsStoredGauge.Set(float64(len(s.cache)))
+	s.mu.Unlock()
+
+	return nil
+}
+
+func (s *Store) UpdateURL(ctx context.Context, shortCode string, url string, title string, deviceURLs map[string]string) error {
+	// Start transaction
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Update main URL
+	result, err := tx.ExecContext(ctx, `
+		UPDATE urls
+		SET url = ?, title = ?
+		WHERE short_code = ?
+	`, url, title, shortCode)
+	if err != nil {
+		return fmt.Errorf("update url: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return ErrNotExist
+	}
+
+	// Delete existing device URLs
+	_, err = tx.ExecContext(ctx, `DELETE FROM device_urls WHERE short_code = ?`, shortCode)
+	if err != nil {
+		return fmt.Errorf("delete device urls: %w", err)
+	}
+
+	// Insert new device URLs
+	deviceURLData := make(map[string]models.DeviceURLData)
+	for platform, deviceURL := range deviceURLs {
+		if platform != "android" && platform != "ios" && platform != "web" {
+			continue // Skip invalid platforms
+		}
+		// Skip empty URLs
+		if deviceURL == "" {
+			continue
+		}
+		data := models.DeviceURLData{
+			URL:       deviceURL,
+			Platform:  platform,
+			CreatedAt: time.Now().UTC(),
+		}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO device_urls (short_code, platform, url, created_at)
+			VALUES (?, ?, ?, ?)
+		`, shortCode, platform, deviceURL, data.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("insert device url: %w", err)
+		}
+		deviceURLData[platform] = data
+	}
+
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	// Update cache
+	s.mu.Lock()
+	if urlData, exists := s.cache[shortCode]; exists {
+		urlData.URL = url
+		urlData.Title = title
+		urlData.DeviceURLs = deviceURLData
+		s.cache[shortCode] = urlData
+	}
 	s.mu.Unlock()
 
 	return nil
