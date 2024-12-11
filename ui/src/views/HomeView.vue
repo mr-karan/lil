@@ -93,20 +93,6 @@
                     />
                   </div>
 
-                  <!-- macOS URL -->
-                  <div class="mt-2">
-                    <label class="label">
-                      <span class="label-text">macOS URL</span>
-                      <span class="label-text-alt text-base-content/60">For macOS devices</span>
-                    </label>
-                    <input
-                      type="url"
-                      v-model="formData.device_urls.macos"
-                      placeholder="URL for macOS devices (e.g., Mac App Store link)"
-                      class="input input-bordered w-full"
-                    />
-                  </div>
-
                   <!-- Note about web fallback -->
                   <div class="mt-4 text-sm text-base-content/70">
                     <p>Note: The main URL above will be used as the default (web) fallback for all other platforms.</p>
@@ -205,7 +191,6 @@ const formData = ref({
   device_urls: {
     android: '',
     ios: '',
-    macos: '',
     // web URL is the main URL
   }
 })

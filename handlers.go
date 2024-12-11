@@ -141,10 +141,6 @@ func (app *App) handleRedirect(w http.ResponseWriter, r *http.Request) {
 			if deviceURL, ok := urlData.DeviceURLs["ios"]; ok {
 				targetURL = deviceURL.URL
 			}
-		case ua.IsMacOS():
-			if deviceURL, ok := urlData.DeviceURLs["macos"]; ok {
-				targetURL = deviceURL.URL
-			}
 		default:
 			// Web/Desktop
 			if deviceURL, ok := urlData.DeviceURLs["web"]; ok {
@@ -223,6 +219,42 @@ func (app *App) handleGetURLs(w http.ResponseWriter, r *http.Request) {
 		"per_page": perPageNum,
 		"count":    total,
 	})
+}
+
+func (app *App) handleUpdateURL(w http.ResponseWriter, r *http.Request) {
+	// Extract shortCode from path
+	shortCode := r.PathValue("shortCode")
+	if shortCode == "" {
+		app.sendErrorResponse(w, "Invalid short code", http.StatusBadRequest, nil)
+		return
+	}
+
+	// Parse request body
+	var req shortenURLRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		app.logger.Error("Invalid request body", "error", err)
+		app.sendErrorResponse(w, "Invalid request body", http.StatusBadRequest, nil)
+		return
+	}
+
+	// Basic validation
+	if req.URL == "" {
+		app.sendErrorResponse(w, "URL is required", http.StatusBadRequest, nil)
+		return
+	}
+
+	// Update URL in store
+	if err := app.store.UpdateURL(context.TODO(), shortCode, req.URL, req.Title, req.DeviceURLs); err != nil {
+		if err == store.ErrNotExist {
+			app.sendErrorResponse(w, "URL not found", http.StatusNotFound, nil)
+			return
+		}
+		app.logger.Error("Failed to update URL", "error", err, "shortCode", shortCode)
+		app.sendErrorResponse(w, "Internal server error", http.StatusInternalServerError, nil)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (app *App) handleDeleteURL(w http.ResponseWriter, r *http.Request) {

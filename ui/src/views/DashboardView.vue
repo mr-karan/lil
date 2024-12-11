@@ -63,12 +63,6 @@
                         {{ url.device_urls.ios.url }}
                       </a>
                     </div>
-                    <div v-if="url.device_urls.macos" class="text-xs">
-                      <span class="font-medium">macOS:</span>
-                      <a :href="url.device_urls.macos.url" target="_blank" class="link link-primary break-all">
-                        {{ url.device_urls.macos.url }}
-                      </a>
-                    </div>
                     <div class="text-xs text-base-content/70">
                       <span class="font-medium">Web:</span>
                       <a :href="url.url" target="_blank" class="link link-primary break-all">
@@ -85,6 +79,11 @@
                     <button class="btn btn-sm" @click="copyShortUrl(url.short_code)">
                       <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                    </button>
+                    <button class="btn btn-sm btn-warning" @click="editUrl(url)">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                       </svg>
                     </button>
                     <button class="btn btn-sm btn-error" @click="deleteUrl(url.short_code)">
@@ -134,12 +133,60 @@
       </div>
     </div>
   </div>
+        <!-- Edit URL Modal -->
+        <dialog id="edit_modal" class="modal">
+          <div class="modal-box">
+            <h3 class="font-bold text-lg mb-4">Edit URL</h3>
+            <form @submit.prevent="updateUrl">
+              <div class="form-control mb-4">
+                <label class="label">
+                  <span class="label-text">URL</span>
+                </label>
+                <input type="url" v-model="editingUrl.url" class="input input-bordered" required />
+              </div>
+
+              <div class="form-control mb-4">
+                <label class="label">
+                  <span class="label-text">Title</span>
+                </label>
+                <input type="text" v-model="editingUrl.title" class="input input-bordered" />
+              </div>
+
+              <div class="form-control mb-4">
+                <label class="label">
+                  <span class="label-text">Device URLs</span>
+                </label>
+                <div class="space-y-2">
+                  <input type="url" v-model="editingUrl.device_urls.android" class="input input-bordered w-full" placeholder="Android URL" />
+                  <input type="url" v-model="editingUrl.device_urls.ios" class="input input-bordered w-full" placeholder="iOS URL" />
+                </div>
+              </div>
+
+              <div class="modal-action">
+                <button type="submit" class="btn btn-primary">Save Changes</button>
+                <button type="button" class="btn" @click="closeEditModal">Cancel</button>
+              </div>
+            </form>
+          </div>
+          <form method="dialog" class="modal-backdrop">
+            <button>close</button>
+          </form>
+        </dialog>
 </template>
 
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 
 const urls = ref([])
+const editingUrl = ref({
+  short_code: '',
+  url: '',
+  title: '',
+  device_urls: {
+    android: '',
+    ios: '',
+  }
+})
 const searchQuery = ref('')
 const currentPage = ref(1)
 const perPage = ref(20)
@@ -225,6 +272,51 @@ async function copyShortUrl(shortCode) {
     setTimeout(() => {
       toast.remove()
     }, 3000)
+  }
+}
+
+function editUrl(url) {
+  editingUrl.value = {
+    short_code: url.short_code,
+    url: url.url,
+    title: url.title || '',
+    device_urls: {
+      android: url.device_urls?.android?.url || '',
+      ios: url.device_urls?.ios?.url || '',
+    }
+  }
+  document.getElementById('edit_modal').showModal()
+}
+
+function closeEditModal() {
+  document.getElementById('edit_modal').close()
+}
+
+async function updateUrl() {
+  try {
+    const response = await fetch(`/api/v1/urls/${editingUrl.value.short_code}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url: editingUrl.value.url,
+        title: editingUrl.value.title,
+        device_urls: {
+          android: editingUrl.value.device_urls.android,
+          ios: editingUrl.value.device_urls.ios,
+        }
+      }),
+    })
+
+    if (response.ok) {
+      closeEditModal()
+      fetchUrls(currentPage.value)
+    } else {
+      console.error('Failed to update URL')
+    }
+  } catch (error) {
+    console.error('Error updating URL:', error)
   }
 }
 
