@@ -2,9 +2,8 @@ package analytics
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -21,10 +20,9 @@ type MatomoConfig struct {
 type MatomoDispatcher struct {
 	config MatomoConfig
 	client *http.Client
-	logger *slog.Logger
 }
 
-func NewMatomoDispatcher(config MatomoConfig, logger *slog.Logger) (*MatomoDispatcher, error) {
+func NewMatomoDispatcher(config MatomoConfig) (*MatomoDispatcher, error) {
 	if config.TrackingURL == "" {
 		return nil, fmt.Errorf("matomo tracking URL is required")
 	}
@@ -40,7 +38,6 @@ func NewMatomoDispatcher(config MatomoConfig, logger *slog.Logger) (*MatomoDispa
 		client: &http.Client{
 			Timeout: config.Timeout,
 		},
-		logger: logger,
 	}, nil
 }
 
@@ -80,6 +77,7 @@ func (m *MatomoDispatcher) Send(ctx context.Context, evt Event) error {
 		}
 		params.Set("token_auth", m.config.AuthToken)
 	}
+	params.Set("send_image", "0")
 
 	// Construct the final URL
 	trackingURL := fmt.Sprintf("%s?%s", m.config.TrackingURL, params.Encode())
@@ -90,31 +88,20 @@ func (m *MatomoDispatcher) Send(ctx context.Context, evt Event) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Add parameter to avoid receiving GIF image
-	params.Set("send_image", "0")
-
-	// Log all request parameters
-	m.logger.Info("sending matomo request",
-		"url", trackingURL,
-		"params", params,
-		"user_agent", evt.UserAgent,
-		"user_ip", evt.UserIP)
-
 	// Send request
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			return fmt.Errorf("matomo request failed: %w", urlErr.Err)
+		}
+		return fmt.Errorf("matomo request failed: %T", err)
 	}
 	defer resp.Body.Close()
 
 	// Check response
 	if resp.StatusCode >= 400 {
-		// Read response body for error details
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("matomo request failed with status: %d, failed to read response body: %v", resp.StatusCode, err)
-		}
-		return fmt.Errorf("matomo request failed with status: %d, response: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("matomo request failed with status: %d", resp.StatusCode)
 	}
 
 	return nil

@@ -110,7 +110,7 @@ func initializeProvider(name string, config map[string]interface{}, logger *slog
 			AuthToken:   authToken,
 			Timeout:     time.Duration(timeout) * time.Second,
 		}
-		return NewMatomoDispatcher(cfg, logger)
+		return NewMatomoDispatcher(cfg)
 	case "accesslog":
 		return NewAccessLogDispatcher(config, logger)
 	case "webhook":
