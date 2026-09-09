@@ -1,0 +1,17 @@
+[server]
+address = "127.0.0.1:17000"
+read_timeout = "7s"
+write_timeout = "7s"
+idle_timeout = "60s"
+
+[db]
+path = ".dev/urls.db"
+
+[app]
+enable_debug_logs = true
+short_url_length = 6
+public_url = "http://localhost:17000"
+
+[analytics]
+enabled = false
+num_workers = 1

@@ -1,17 +1,19 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/mileusna/useragent"
 	"github.com/mr-karan/lil/internal/analytics"
 	"github.com/mr-karan/lil/internal/metrics"
+	"github.com/mr-karan/lil/internal/redirect"
 	"github.com/mr-karan/lil/internal/store"
 )
 
@@ -21,6 +23,35 @@ type shortenURLRequest struct {
 	Slug         string            `json:"slug,omitempty"`
 	ExpiryInSecs *int64            `json:"expiry_in_secs,omitempty"`
 	DeviceURLs   map[string]string `json:"device_urls,omitempty"` // platform -> url mapping
+}
+
+var slugPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
+
+func decodeJSON(r *http.Request, value any) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("request body must contain one JSON object")
+	}
+	return nil
+}
+
+func (req shortenURLRequest) validate() error {
+	if err := redirect.ValidateDestinations(req.URL, req.DeviceURLs); err != nil {
+		return err
+	}
+	if req.Slug != "" {
+		if !slugPattern.MatchString(req.Slug) || req.Slug == "admin" || req.Slug == "api" {
+			return fmt.Errorf("slug must use letters, digits, underscores or hyphens and cannot be admin or api")
+		}
+	}
+	if req.ExpiryInSecs != nil && (*req.ExpiryInSecs < 0 || *req.ExpiryInSecs > int64((time.Duration(1<<63-1))/time.Second)) {
+		return fmt.Errorf("expiry is outside the supported range")
+	}
+	return nil
 }
 
 // httpResp represents the structure of the JSON response envelope
@@ -55,12 +86,13 @@ func (app *App) sendErrorResponse(w http.ResponseWriter, message string, code in
 
 func (app *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	app.sendResponse(w, map[string]interface{}{
-		"version": buildString,
+		"version":    buildString,
+		"public_url": ko.String("app.public_url"),
 	})
 }
 
 func (app *App) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
-	if err := app.store.Ping(context.TODO()); err != nil {
+	if err := app.store.Ping(r.Context()); err != nil {
 		app.sendErrorResponse(w, "Database is not healthy", http.StatusServiceUnavailable, nil)
 		return
 	}
@@ -70,15 +102,15 @@ func (app *App) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 func (app *App) handleShortenURL(w http.ResponseWriter, r *http.Request) {
 	// Parse request body
 	var req shortenURLRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		app.logger.Error("Invalid request body", "error", err)
 		app.sendErrorResponse(w, "Invalid request body", http.StatusBadRequest, nil)
 		return
 	}
 
 	// Basic validation
-	if req.URL == "" {
-		app.sendErrorResponse(w, "URL is required", http.StatusBadRequest, nil)
+	if err := req.validate(); err != nil {
+		app.sendErrorResponse(w, err.Error(), http.StatusBadRequest, nil)
 		return
 	}
 
@@ -89,15 +121,19 @@ func (app *App) handleShortenURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call store method to create short URL with device URLs
-	shortCode, err := app.store.CreateShortURL(context.TODO(), req.URL, req.Title, req.Slug, expiry, req.DeviceURLs)
+	shortCode, err := app.store.CreateShortURL(r.Context(), req.URL, req.Title, req.Slug, expiry, req.DeviceURLs)
 	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			app.sendErrorResponse(w, err.Error(), http.StatusConflict, nil)
+			return
+		}
 		app.logger.Error("Failed to create short URL", "error", err, "url", req.URL)
-		metrics.URLsShortenedTotal.Inc()
 		app.sendErrorResponse(w, "Failed to create short URL", http.StatusInternalServerError, nil)
 		return
 	}
 
 	// Return the shortened URL with public base URL
+	metrics.URLsShortenedTotal.Inc()
 	app.sendResponse(w, map[string]interface{}{
 		"short_code": shortCode,
 		"public_url": ko.String("app.public_url"),
@@ -113,7 +149,7 @@ func (app *App) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get URL data from store
-	urlData, err := app.store.GetRedirectData(context.TODO(), shortCode)
+	urlData, err := app.store.GetRedirectData(r.Context(), shortCode)
 	if err != nil {
 		if err == store.ErrNotExist {
 			metrics.RedirectFailuresTotal.Inc()
@@ -125,29 +161,12 @@ func (app *App) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse User-Agent
-	ua := useragent.Parse(r.UserAgent())
-	targetURL := urlData.URL // default URL
-
-	// Check for device-specific URLs
-	if urlData.DeviceURLs != nil {
-		// Try to match platform
-		switch {
-		case ua.IsAndroid():
-			if deviceURL, ok := urlData.DeviceURLs["android"]; ok {
-				targetURL = deviceURL.URL
-			}
-		case ua.IsIOS():
-			if deviceURL, ok := urlData.DeviceURLs["ios"]; ok {
-				targetURL = deviceURL.URL
-			}
-		default:
-			// Web/Desktop
-			if deviceURL, ok := urlData.DeviceURLs["web"]; ok {
-				targetURL = deviceURL.URL
-			}
-		}
+	platform, err := redirect.Detect(r)
+	if err != nil {
+		app.sendErrorResponse(w, err.Error(), http.StatusBadRequest, nil)
+		return
 	}
+	targetURL := redirect.Destination(urlData, platform)
 
 	metrics.RedirectsTotal.Inc()
 	if app.analytics != nil {
@@ -179,7 +198,10 @@ func (app *App) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Ensure browsers don't cache the redirect response
-	w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Add("Vary", "User-Agent")
+	w.Header().Add("Vary", "Sec-CH-UA-Platform")
+	w.Header().Set("X-Lil-Platform", string(platform))
 	w.Header().Set("Location", targetURL)
 	w.WriteHeader(http.StatusFound)
 }
@@ -205,7 +227,11 @@ func (app *App) handleGetURLs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch URLs from store
-	urls, total, err := app.store.GetURLs(context.TODO(), pageNum, perPageNum)
+	if pageNum < 1 || pageNum > 1000000 || perPageNum < 1 || perPageNum > 1000 {
+		app.sendErrorResponse(w, "page must be 1..1000000 and per_page 1..1000", http.StatusBadRequest, nil)
+		return
+	}
+	urls, total, err := app.store.GetURLs(r.Context(), pageNum, perPageNum)
 	if err != nil {
 		app.logger.Error("Failed to fetch URLs", "error", err)
 		app.sendErrorResponse(w, "Failed to fetch URLs", http.StatusInternalServerError, nil)
@@ -231,20 +257,20 @@ func (app *App) handleUpdateURL(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request body
 	var req shortenURLRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		app.logger.Error("Invalid request body", "error", err)
 		app.sendErrorResponse(w, "Invalid request body", http.StatusBadRequest, nil)
 		return
 	}
 
 	// Basic validation
-	if req.URL == "" {
-		app.sendErrorResponse(w, "URL is required", http.StatusBadRequest, nil)
+	if err := req.validate(); err != nil {
+		app.sendErrorResponse(w, err.Error(), http.StatusBadRequest, nil)
 		return
 	}
 
 	// Update URL in store
-	if err := app.store.UpdateURL(context.TODO(), shortCode, req.URL, req.Title, req.DeviceURLs); err != nil {
+	if err := app.store.UpdateURL(r.Context(), shortCode, req.URL, req.Title, req.DeviceURLs); err != nil {
 		if err == store.ErrNotExist {
 			app.sendErrorResponse(w, "URL not found", http.StatusNotFound, nil)
 			return
@@ -266,7 +292,7 @@ func (app *App) handleDeleteURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Delete URL from store
-	if err := app.store.DeleteURL(context.TODO(), shortCode); err != nil {
+	if err := app.store.DeleteURL(r.Context(), shortCode); err != nil {
 		if err == store.ErrNotExist {
 			app.sendErrorResponse(w, "URL not found", http.StatusNotFound, nil)
 			return
@@ -277,5 +303,6 @@ func (app *App) handleDeleteURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return success with no content
+	metrics.URLsDeletedTotal.Inc()
 	w.WriteHeader(http.StatusNoContent)
 }

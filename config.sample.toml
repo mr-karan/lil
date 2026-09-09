@@ -13,16 +13,7 @@ idle_timeout = "60s"
 [db]
 # Path to SQLite database file
 path = "urls.db"
-# Maximum number of open connections to the database
-max_open_conns = 250
-# Maximum number of idle connections in the pool
-max_idle_conns = 100
-# Maximum amount of time a connection may be reused (in minutes)
-conn_max_lifetime_mins = 30
-# Size of the write buffer for batching database operations
-buffer_size = 5000
-# How often the write buffer is flushed to database
-flush_interval = "500ms"
+# SQLite uses one persistent connection and commits writes synchronously.
 
 # Application configuration
 [app]

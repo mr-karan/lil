@@ -1,42 +1,83 @@
-.PHONY: build run
+SHELL := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
+.DEFAULT_GOAL := help
 
 BIN := bin/lil.bin
+CONFIG ?= config.toml
+VERSION := $(shell git describe --tags --always --dirty)
+COMMIT := $(shell git rev-parse --short HEAD)
+BUILDSTR := $(VERSION) ($(COMMIT))
+DEV_SOCKET := $(CURDIR)/.dev/tmux.sock
+export LIL_TMUX_SOCKET := $(DEV_SOCKET)
 
-LAST_COMMIT := $(shell git rev-parse --short HEAD)
-LAST_COMMIT_DATE := $(shell git show -s --format=%ci ${LAST_COMMIT})
-VERSION := $(shell git describe --tags)
-BUILDSTR := ${VERSION} (Commit: ${LAST_COMMIT_DATE} (${LAST_COMMIT}), Build: $(shell date +"%Y-%m-%d% %H:%M:%S %z"))
+.PHONY: help install build-ui build run test lint check dev dev-api dev-ui dev-stop dev-logs dev-attach dev-restart clean
 
-.PHONY: build-ui
-build-ui:
-	cd ui && pnpm install && pnpm build
+help: ## Show available commands
+	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-.PHONY: build
-build: build-ui
-	CGO_ENABLED=0 go build -o ${BIN} -ldflags="-X 'main.buildString=${BUILDSTR}'" .
+install: ## Install locked frontend dependencies
+	cd ui && pnpm install --frozen-lockfile
 
-.PHONY: run
-run: build ## Run binary.
-	./${BIN}
+build-ui: install ## Build the embedded Vue UI
+	cd ui && pnpm build
 
-.PHONY: clean
-clean: ## Remove temporary files and the `bin` folder.
-	rm -rf bin
+build: build-ui ## Build the Go binary and embedded UI
+	mkdir -p bin
+	CGO_ENABLED=0 go build -o $(BIN) -ldflags="-X 'main.buildString=$(BUILDSTR)'" .
 
-.PHONY: dev-up
-dev-up: ## Start development environment
-	docker network create lil-dev-network || true
-	docker compose -f dev/docker-compose.yml -f dev/compose-plausible.yml up --build -d
+run: build ## Run the production-style binary (CONFIG=config.toml)
+	./$(BIN) --config="$(CONFIG)"
 
-.PHONY: dev-down
-dev-down: ## Stop development environment
-	docker compose -f dev/docker-compose.yml -f dev/compose-plausible.yml down
+test: build-ui ## Run backend tests with the race detector
+	go test -race ./...
 
-.PHONY: dev-logs
-dev-logs: ## View development logs
-	docker compose -f dev/docker-compose.yml -f dev/compose-plausible.yml logs -f
+lint: build-ui ## Run Go vet/staticcheck, Vue type checks and ESLint
+	go vet ./...
+	staticcheck ./...
+	cd ui && pnpm typecheck && pnpm lint
 
-.PHONY: hosts-entry
-hosts-entry: ## Add required entries to /etc/hosts
-	@echo "Adding entries to /etc/hosts..."
-	@sudo sh -c 'echo "127.0.0.1 lil.internal plausible.internal" >> /etc/hosts'
+check: test lint ## Run all checks
+
+dev: build ## Start API and hot-reloading Vue UI in isolated tmux
+	@mkdir -p .dev
+	@if tmux -S "$$LIL_TMUX_SOCKET" has-session -t lil-dev 2>/dev/null; then \
+		echo 'Already running. Use make dev-restart to rebuild the API.'; \
+	else \
+		tmux -S "$$LIL_TMUX_SOCKET" new-session -d -s lil-dev -n api -c "$(CURDIR)" '$(MAKE) dev-api'; \
+		tmux -S "$$LIL_TMUX_SOCKET" new-window -t lil-dev -n ui -c "$(CURDIR)" '$(MAKE) dev-ui'; \
+	fi
+	@echo 'Admin: http://localhost:5173/admin/ (local dev, no login)'
+	@echo 'API/redirects: http://localhost:17000 | Database: .dev/urls.db'
+	@echo 'Use make dev-logs, make dev-attach, or make dev-stop.'
+
+dev-api: ## Run the local API in foreground
+	mkdir -p .dev
+	./$(BIN) --config=dev/local.toml 2>&1 | tee .dev/api.log
+
+dev-ui: ## Run Vite with hot reload in foreground
+	mkdir -p .dev
+	cd ui && API_URL=http://127.0.0.1:17000 pnpm dev --host 127.0.0.1 --port 5173 --strictPort 2>&1 | tee ../.dev/ui.log
+
+dev-stop: ## Stop only this project's local dev session
+	@if tmux -S "$$LIL_TMUX_SOCKET" has-session -t lil-dev 2>/dev/null; then \
+		tmux -S "$$LIL_TMUX_SOCKET" list-panes -s -t lil-dev -F '#{pane_id}' | while read -r pane; do \
+			tmux -S "$$LIL_TMUX_SOCKET" send-keys -t "$$pane" C-c; \
+		done; \
+	fi
+
+dev-restart: ## Stop, rebuild and restart local dev
+	$(MAKE) dev-stop
+	@for i in $$(seq 1 50); do \
+		if ! tmux -S "$$LIL_TMUX_SOCKET" has-session -t lil-dev 2>/dev/null; then break; fi; \
+		sleep 0.1; \
+	done
+	$(MAKE) dev
+
+dev-logs: ## Show recent local API and UI logs
+	tail -n 60 .dev/api.log .dev/ui.log
+
+dev-attach: ## Attach to local dev terminals (Ctrl-b d detaches)
+	tmux -S "$$LIL_TMUX_SOCKET" attach-session -t lil-dev
+
+clean: ## Remove build outputs (keeps local database)
+	rm -rf bin ui/dist

@@ -3,12 +3,17 @@
     <div class="card bg-base-100 shadow-xl">
       <div class="card-body">
         <h2 class="card-title mb-4">URL Dashboard</h2>
+        <p v-if="errorMessage" role="alert" class="alert alert-error">
+          {{ errorMessage }}
+        </p>
+        <p v-if="loading" role="status">Loading links…</p>
 
         <div class="flex justify-between items-center mb-4">
           <div class="form-control">
             <input
               type="text"
-              placeholder="Search URLs..."
+              aria-label="Filter links on this page"
+              placeholder="Filter this page..."
               class="input input-bordered w-64"
               v-model="searchQuery"
             />
@@ -16,6 +21,7 @@
           <div class="form-control">
             <select
               class="select select-bordered"
+              aria-label="Links per page"
               v-model="perPage"
               @change="handlePerPageChange"
             >
@@ -46,49 +52,112 @@
               <tr v-for="url in filteredUrls" :key="url.short_code">
                 <td class="whitespace-nowrap">{{ url.short_code }}</td>
                 <td class="break-all">
-                  <a :href="url.url" target="_blank" class="link link-primary">{{ url.url }}</a>
+                  <a :href="url.url" target="_blank" class="link">{{
+                    url.url
+                  }}</a>
                 </td>
                 <td>{{ url.title || '-' }}</td>
                 <td>
                   <div v-if="url.device_urls" class="space-y-2">
                     <div v-if="url.device_urls.android" class="text-xs">
                       <span class="font-medium">Android:</span>
-                      <a :href="url.device_urls.android.url" target="_blank" class="link link-primary break-all">
+                      <a
+                        :href="url.device_urls.android.url"
+                        target="_blank"
+                        class="link break-all"
+                      >
                         {{ url.device_urls.android.url }}
                       </a>
                     </div>
                     <div v-if="url.device_urls.ios" class="text-xs">
                       <span class="font-medium">iOS:</span>
-                      <a :href="url.device_urls.ios.url" target="_blank" class="link link-primary break-all">
+                      <a
+                        :href="url.device_urls.ios.url"
+                        target="_blank"
+                        class="link break-all"
+                      >
                         {{ url.device_urls.ios.url }}
                       </a>
                     </div>
-                    <div class="text-xs text-base-content/70">
+                    <div class="text-xs">
                       <span class="font-medium">Web:</span>
-                      <a :href="url.url" target="_blank" class="link link-primary break-all">
-                        {{ url.url }}
+                      <a
+                        :href="url.device_urls.web?.url || url.url"
+                        target="_blank"
+                        class="link break-all"
+                      >
+                        {{ url.device_urls.web?.url || url.url }}
                       </a>
                     </div>
                   </div>
                   <span v-else>-</span>
                 </td>
-                <td class="whitespace-nowrap">{{ formatDate(url.created_at) }}</td>
-                <td class="whitespace-nowrap">{{ url.expires_at ? formatDate(url.expires_at) : 'Never' }}</td>
+                <td class="whitespace-nowrap">
+                  {{ formatDate(url.created_at) }}
+                </td>
+                <td class="whitespace-nowrap">
+                  {{ url.expires_at ? formatDate(url.expires_at) : 'Never' }}
+                </td>
                 <td class="whitespace-nowrap">
                   <div class="flex gap-2">
-                    <button class="btn btn-sm" @click="copyShortUrl(url.short_code)">
-                      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    <button
+                      class="btn btn-sm"
+                      aria-label="Copy short URL"
+                      @click="copyShortUrl(url.short_code)"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        class="h-4 w-4"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                        />
                       </svg>
                     </button>
-                    <button class="btn btn-sm btn-warning" @click="editUrl(url)">
-                      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                    <button
+                      class="btn btn-sm btn-warning"
+                      aria-label="Edit link"
+                      @click="editUrl(url)"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        class="h-4 w-4"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                        />
                       </svg>
                     </button>
-                    <button class="btn btn-sm btn-error" @click="deleteUrl(url.short_code)">
-                      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    <button
+                      class="btn btn-sm btn-error"
+                      aria-label="Delete link"
+                      @click="deleteUrl(url.short_code)"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        class="h-4 w-4"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                        />
                       </svg>
                     </button>
                   </div>
@@ -101,9 +170,10 @@
         <!-- Pagination -->
         <div class="flex justify-between items-center mt-6">
           <div class="text-sm text-base-content/70">
-            Showing {{ filteredUrls.length ? (currentPage - 1) * perPage + 1 : 0 }}
-            to {{ Math.min(currentPage * perPage, totalUrls) }}
-            of {{ totalUrls }} entries
+            Showing
+            {{ filteredUrls.length ? (currentPage - 1) * perPage + 1 : 0 }} to
+            {{ Math.min(currentPage * perPage, totalUrls) }} of
+            {{ totalUrls }} entries
           </div>
           <div class="join">
             <button
@@ -112,8 +182,19 @@
               :disabled="currentPage === 1"
               @click="changePage(currentPage - 1)"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-4 w-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M15 19l-7-7 7-7"
+                />
               </svg>
               Previous
             </button>
@@ -124,8 +205,19 @@
               @click="changePage(currentPage + 1)"
             >
               Next
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-4 w-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M9 5l7 7-7 7"
+                />
               </svg>
             </button>
           </div>
@@ -133,59 +225,98 @@
       </div>
     </div>
   </div>
-        <!-- Edit URL Modal -->
-        <dialog id="edit_modal" class="modal">
-          <div class="modal-box">
-            <h3 class="font-bold text-lg mb-4">Edit URL</h3>
-            <form @submit.prevent="updateUrl">
-              <div class="form-control mb-4">
-                <label class="label">
-                  <span class="label-text">URL</span>
-                </label>
-                <input type="url" v-model="editingUrl.url" class="input input-bordered" required />
-              </div>
+  <!-- Edit URL Modal -->
+  <dialog id="edit_modal" class="modal">
+    <div class="modal-box">
+      <h3 class="font-bold text-lg mb-4">Edit URL</h3>
+      <p v-if="errorMessage" role="alert" class="alert alert-error">
+        {{ errorMessage }}
+      </p>
+      <form @submit.prevent="updateUrl">
+        <div class="form-control mb-4">
+          <label class="label">
+            <span class="label-text">URL</span>
+          </label>
+          <input
+            type="url"
+            v-model="editingUrl.url"
+            class="input input-bordered"
+            required
+          />
+        </div>
 
-              <div class="form-control mb-4">
-                <label class="label">
-                  <span class="label-text">Title</span>
-                </label>
-                <input type="text" v-model="editingUrl.title" class="input input-bordered" />
-              </div>
+        <div class="form-control mb-4">
+          <label class="label">
+            <span class="label-text">Title</span>
+          </label>
+          <input
+            type="text"
+            v-model="editingUrl.title"
+            class="input input-bordered"
+          />
+        </div>
 
-              <div class="form-control mb-4">
-                <label class="label">
-                  <span class="label-text">Device URLs</span>
-                </label>
-                <div class="space-y-2">
-                  <input type="url" v-model="editingUrl.device_urls.android" class="input input-bordered w-full" placeholder="Android URL" />
-                  <input type="url" v-model="editingUrl.device_urls.ios" class="input input-bordered w-full" placeholder="iOS URL" />
-                </div>
-              </div>
-
-              <div class="modal-action">
-                <button type="submit" class="btn btn-primary">Save Changes</button>
-                <button type="button" class="btn" @click="closeEditModal">Cancel</button>
-              </div>
-            </form>
+        <div class="form-control mb-4">
+          <label class="label">
+            <span class="label-text">Device URLs</span>
+          </label>
+          <div class="space-y-2">
+            <input
+              type="url"
+              v-model="editingUrl.device_urls.android"
+              class="input input-bordered w-full"
+              placeholder="Android URL"
+            />
+            <input
+              type="url"
+              v-model="editingUrl.device_urls.ios"
+              class="input input-bordered w-full"
+              placeholder="iOS URL"
+            />
+            <input
+              type="url"
+              v-model="editingUrl.device_urls.web"
+              class="input input-bordered w-full"
+              placeholder="Web URL (optional)"
+            />
+            <p class="text-sm">
+              Unrecognized devices use Web. Missing platform destinations use
+              the original URL. Use ?platform=ios or ?platform=android when the
+              device is known.
+            </p>
           </div>
-          <form method="dialog" class="modal-backdrop">
-            <button>close</button>
-          </form>
-        </dialog>
+        </div>
+
+        <div class="modal-action">
+          <button type="submit" class="btn btn-primary">Save Changes</button>
+          <button type="button" class="btn" @click="closeEditModal">
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
+    <form method="dialog" class="modal-backdrop">
+      <button>close</button>
+    </form>
+  </dialog>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
+import { request, type ShortURL, type URLEdit } from '../api'
 
-const urls = ref([])
-const editingUrl = ref({
+const urls = ref<ShortURL[]>([])
+const errorMessage = ref('')
+const publicURL = ref('')
+const editingUrl = ref<URLEdit>({
   short_code: '',
   url: '',
   title: '',
   device_urls: {
     android: '',
     ios: '',
-  }
+    web: '',
+  },
 })
 const searchQuery = ref('')
 const currentPage = ref(1)
@@ -197,18 +328,25 @@ const filteredUrls = computed(() => {
   if (!searchQuery.value) return urls.value
 
   const query = searchQuery.value.toLowerCase()
-  return urls.value.filter(url =>
-    url.short_code.toLowerCase().includes(query) ||
-    url.url.toLowerCase().includes(query) ||
-    (url.title && url.title.toLowerCase().includes(query))
+  return urls.value.filter(
+    url =>
+      url.short_code.toLowerCase().includes(query) ||
+      url.url.toLowerCase().includes(query) ||
+      (url.title && url.title.toLowerCase().includes(query)),
   )
 })
 
 async function fetchUrls(page = 1) {
   loading.value = true
+  errorMessage.value = ''
   try {
-    const response = await fetch(`/api/v1/urls?page=${page}&per_page=${perPage.value}`)
-    const data = await response.json()
+    const response = await request(
+      `/api/v1/urls?page=${page}&per_page=${perPage.value}`,
+    )
+    const data: {
+      status: string
+      data: { urls: ShortURL[]; count: number; page: number }
+    } = await response.json()
 
     if (data.status === 'success') {
       urls.value = data.data.urls
@@ -216,13 +354,14 @@ async function fetchUrls(page = 1) {
       currentPage.value = data.data.page
     }
   } catch (error) {
-    console.error('Error fetching URLs:', error)
+    errorMessage.value =
+      error instanceof Error ? error.message : 'Failed to load links'
   } finally {
     loading.value = false
   }
 }
 
-function changePage(page) {
+function changePage(page: number) {
   // Calculate total pages
   const totalPages = Math.ceil(totalUrls.value / perPage.value)
 
@@ -238,13 +377,14 @@ function handlePerPageChange() {
   fetchUrls(1)
 }
 
-function formatDate(dateString) {
+function formatDate(dateString: string) {
   return new Date(dateString).toLocaleString()
 }
 
-async function copyShortUrl(shortCode) {
-  const url = `${window.location.origin}/${shortCode}`
+async function copyShortUrl(shortCode: string) {
   try {
+    if (!publicURL.value) throw new Error('Public URL is not configured')
+    const url = `${publicURL.value.replace(/\/$/, '')}/${encodeURIComponent(shortCode)}`
     await navigator.clipboard.writeText(url)
     // Show success toast
     const toast = document.createElement('div')
@@ -275,7 +415,8 @@ async function copyShortUrl(shortCode) {
   }
 }
 
-function editUrl(url) {
+function editUrl(url: ShortURL) {
+  errorMessage.value = ''
   editingUrl.value = {
     short_code: url.short_code,
     url: url.url,
@@ -283,31 +424,38 @@ function editUrl(url) {
     device_urls: {
       android: url.device_urls?.android?.url || '',
       ios: url.device_urls?.ios?.url || '',
-    }
+      web: url.device_urls?.web?.url || '',
+    },
   }
-  document.getElementById('edit_modal').showModal()
+  const modal = document.getElementById('edit_modal')
+  if (modal instanceof HTMLDialogElement) modal.showModal()
 }
 
 function closeEditModal() {
-  document.getElementById('edit_modal').close()
+  const modal = document.getElementById('edit_modal')
+  if (modal instanceof HTMLDialogElement) modal.close()
 }
 
 async function updateUrl() {
   try {
-    const response = await fetch(`/api/v1/urls/${editingUrl.value.short_code}`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
+    const response = await request(
+      `/api/v1/urls/${encodeURIComponent(editingUrl.value.short_code)}`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: editingUrl.value.url,
+          title: editingUrl.value.title,
+          device_urls: {
+            android: editingUrl.value.device_urls.android,
+            ios: editingUrl.value.device_urls.ios,
+            web: editingUrl.value.device_urls.web,
+          },
+        }),
       },
-      body: JSON.stringify({
-        url: editingUrl.value.url,
-        title: editingUrl.value.title,
-        device_urls: {
-          android: editingUrl.value.device_urls.android,
-          ios: editingUrl.value.device_urls.ios,
-        }
-      }),
-    })
+    )
 
     if (response.ok) {
       closeEditModal()
@@ -316,29 +464,42 @@ async function updateUrl() {
       console.error('Failed to update URL')
     }
   } catch (error) {
-    console.error('Error updating URL:', error)
+    errorMessage.value =
+      error instanceof Error ? error.message : 'Failed to update link'
   }
 }
 
-async function deleteUrl(shortCode) {
+async function deleteUrl(shortCode: string) {
   if (!confirm('Are you sure you want to delete this URL?')) {
     return
   }
 
   try {
-    const response = await fetch(`/api/v1/urls/${shortCode}`, {
-      method: 'DELETE',
-    })
+    const response = await request(
+      `/api/v1/urls/${encodeURIComponent(shortCode)}`,
+      {
+        method: 'DELETE',
+      },
+    )
     if (response.status === 204) {
       // Refresh the current page
       fetchUrls(currentPage.value)
     }
   } catch (error) {
-    console.error('Error deleting URL:', error)
+    errorMessage.value =
+      error instanceof Error ? error.message : 'Failed to delete link'
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   fetchUrls()
+  try {
+    const response = await request('/api/v1')
+    const body: { data: { public_url: string } } = await response.json()
+    publicURL.value = body.data.public_url
+  } catch (error) {
+    errorMessage.value =
+      error instanceof Error ? error.message : 'Failed to load configuration'
+  }
 })
 </script>

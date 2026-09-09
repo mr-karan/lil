@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,7 @@ type Manager struct {
 	eventChan   chan Event
 	logger      *slog.Logger
 	numWorkers  int
+	workers     sync.WaitGroup
 }
 
 // Config represents analytics configuration
@@ -47,6 +49,9 @@ type Config struct {
 func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 	if !cfg.Enabled {
 		return nil, nil
+	}
+	if cfg.NumWorkers < 1 {
+		return nil, fmt.Errorf("analytics requires at least one worker")
 	}
 
 	m := &Manager{
@@ -139,7 +144,7 @@ func initializeProvider(name string, config map[string]interface{}, logger *slog
 // Start begins the worker routines
 func (m *Manager) Start(ctx context.Context) {
 	for i := 0; i < m.numWorkers; i++ {
-		go m.worker(ctx, i)
+		m.workers.Go(func() { m.worker(ctx, i) })
 	}
 }
 
@@ -154,6 +159,7 @@ func (m *Manager) Track(evt Event) {
 
 // Close cleans up resources
 func (m *Manager) Close() error {
+	m.workers.Wait()
 	for _, d := range m.dispatchers {
 		if err := d.Close(); err != nil {
 			m.logger.Error("failed to close dispatcher",

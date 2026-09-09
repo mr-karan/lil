@@ -11,10 +11,6 @@ import (
 	flag "github.com/spf13/pflag"
 )
 
-func init() {
-	initConfig()
-}
-
 func initConfig() {
 	f := flag.NewFlagSet("config", flag.ContinueOnError)
 
@@ -31,7 +27,7 @@ func initConfig() {
 		os.Exit(1)
 	}
 
-	// Load environment variables
+	// Merge command-line flags over file configuration.
 	if err := ko.Load(posflag.Provider(f, ".", ko), nil); err != nil {
 		log.Printf("Error loading environment variables: %v", err)
 		os.Exit(1)

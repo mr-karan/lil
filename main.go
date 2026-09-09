@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-	"github.com/VictoriaMetrics/metrics"
 	"github.com/knadh/koanf/v2"
 	"github.com/mr-karan/lil/internal/analytics"
-	"github.com/mr-karan/lil/internal/middleware"
 	"github.com/mr-karan/lil/internal/store"
 )
 
@@ -25,23 +28,25 @@ var (
 )
 
 func main() {
+	if err := run(); err != nil {
+		slog.Error("application failed", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	initConfig()
 	app := &App{
 		logger: initLogger(ko.Bool("app.enable_debug_logs")),
 	}
 
 	// Initialize SQLite store.
 	store, err := store.New(store.Conf{
-		DBPath:              ko.MustString("db.path"),
-		MaxOpenConns:        ko.MustInt("db.max_open_conns"),
-		MaxIdleConns:        ko.MustInt("db.max_idle_conns"),
-		ConnMaxLifetimeMins: ko.MustInt("db.conn_max_lifetime_mins"),
-		ShortURLLength:      ko.MustInt("app.short_url_length"),
-		BufferSize:          ko.MustInt("db.buffer_size"),
-		FlushInterval:       ko.MustDuration("db.flush_interval"),
+		DBPath:         ko.MustString("db.path"),
+		ShortURLLength: ko.MustInt("app.short_url_length"),
 	}, app.logger)
 	if err != nil {
-		app.logger.Error("Failed to initialize SQLite store", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize SQLite store: %w", err)
 	}
 	defer store.Close()
 
@@ -50,7 +55,11 @@ func main() {
 	// Initialize analytics manager.
 	providers := make(map[string]map[string]interface{})
 	if providersRaw := ko.Get("analytics.providers"); providersRaw != nil {
-		for provider, config := range providersRaw.(map[string]interface{}) {
+		providerValues, ok := providersRaw.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("analytics.providers must be a table")
+		}
+		for provider, config := range providerValues {
 			if configMap, ok := config.(map[string]interface{}); ok {
 				providers[provider] = configMap
 			}
@@ -65,53 +74,56 @@ func main() {
 
 	analyticsManager, err := analytics.NewManager(analyticsConfig, app.logger)
 	if err != nil {
-		app.logger.Error("Failed to initialize analytics", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize analytics: %w", err)
 	}
 	app.analytics = analyticsManager
 
 	// Start analytics workers for dispatching events.
-	analyticsManager.Start(context.TODO())
-
-	// Initialize router and start server
-	mux := http.NewServeMux()
-
-	// API routes
-	mux.HandleFunc("GET /api/v1", app.handleIndex)
-	mux.HandleFunc("GET /api/v1/health", app.handleHealthCheck)
-	mux.HandleFunc("POST /api/v1/shorten", app.handleShortenURL)
-	mux.HandleFunc("GET /api/v1/urls", app.handleGetURLs)
-	mux.HandleFunc("PUT /api/v1/urls/{shortCode}", app.handleUpdateURL)
-	mux.HandleFunc("DELETE /api/v1/urls/{shortCode}", app.handleDeleteURL)
-	mux.HandleFunc("GET /api/v1/metrics", func(w http.ResponseWriter, r *http.Request) {
-		metrics.WritePrometheus(w, true)
-	})
-
-	// Admin UI routes with basic auth
-	adminHandler := getAdminUI()
-	if username, password := ko.String("admin.username"), ko.String("admin.password"); username != "" && password != "" {
-		adminHandler = middleware.BasicAuth(username, password)(adminHandler)
+	if analyticsManager != nil {
+		analyticsCtx, cancelAnalytics := context.WithCancel(context.Background())
+		analyticsManager.Start(analyticsCtx)
+		defer func() {
+			cancelAnalytics()
+			analyticsManager.Close()
+		}()
 	}
-	mux.Handle("GET /admin/", adminHandler)
-	mux.Handle("GET /admin/...", adminHandler)
 
-	// Short URL redirect handler (catch-all)
-	mux.HandleFunc("GET /{shortCode}", app.handleRedirect)
-
+	username, password := ko.String("admin.username"), ko.String("admin.password")
+	if (username == "") != (password == "") {
+		return fmt.Errorf("admin username and password must either both be set or both be empty")
+	}
 	server := &http.Server{
-		Addr:         ko.MustString("server.address"),
-		Handler:      mux,
-		ReadTimeout:  ko.MustDuration("server.read_timeout"),
-		WriteTimeout: ko.MustDuration("server.write_timeout"),
-		IdleTimeout:  ko.MustDuration("server.idle_timeout"),
+		Addr:              ko.MustString("server.address"),
+		Handler:           app.routes(username, password),
+		ReadTimeout:       ko.MustDuration("server.read_timeout"),
+		WriteTimeout:      ko.MustDuration("server.write_timeout"),
+		IdleTimeout:       ko.MustDuration("server.idle_timeout"),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	// Start URL expiry worker
-	app.store.StartExpiryWorker(context.Background())
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	app.store.StartExpiryWorker(ctx)
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			app.logger.Error("HTTP shutdown failed", "error", err)
+			server.Close()
+		}
+	}()
 
 	app.logger.Info("starting server", "address", server.Addr, "build", buildString)
-	if err := server.ListenAndServe(); err != nil {
-		app.logger.Error("server failed to start", "error", err)
-		os.Exit(1)
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		stop()
+		<-shutdownDone
+		return fmt.Errorf("serve HTTP: %w", err)
 	}
+	stop()
+	<-shutdownDone
+	return nil
 }

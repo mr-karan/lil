@@ -45,3 +45,4 @@ access.log
 config.toml
 *.env
 dist/
+.dev/

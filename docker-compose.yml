@@ -4,7 +4,7 @@ services:
     container_name: lil
     restart: unless-stopped
     ports:
-      - "7000:7000"
+      - "127.0.0.1:7000:7000"
     volumes:
       - lil_data:/app/data
       - ./logs:/var/log
@@ -33,13 +33,11 @@ configs:
 
       [db]
       path = "/app/data/urls.db"
-      max_open_conns = 250
-      max_idle_conns = 100
-      conn_max_lifetime_mins = 30
 
       [app]
       enable_debug_logs = true
       short_url_length = 6
+      public_url = "http://localhost:7000"
 
       [analytics]
       enabled = true

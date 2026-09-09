@@ -2,17 +2,18 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	_ "embed"
 	"errors"
 	"fmt"
 	"log/slog"
-	rand "math/rand/v2"
-	"strings"
+	"math/big"
 	"sync"
 	"time"
 
 	"github.com/mr-karan/lil/internal/metrics"
+	"github.com/mr-karan/lil/internal/redirect"
 	"github.com/mr-karan/lil/models"
 	_ "modernc.org/sqlite"
 )
@@ -21,565 +22,304 @@ import (
 var pragmas string
 
 var ErrNotExist = errors.New("the URL does not exist")
+var ErrConflict = errors.New("short code already exists")
 
+// Store commits each mutation before updating its in-memory redirect cache.
 type Store struct {
 	db          *sql.DB
-	cache       map[string]models.URLData
-	mu          sync.RWMutex
 	logger      *slog.Logger
 	shortURLLen int
-
-	// Write buffer components
-	writeBuf    []models.URLData
-	bufMu       sync.Mutex
-	bufferSize  int
-	flushTicker *time.Ticker
-	done        chan struct{}
-	flushChan   chan []models.URLData
-	workerDone  chan struct{}
+	cache       map[string]models.URLData
+	mu          sync.RWMutex
+	writeMu     sync.Mutex
+	workers     sync.WaitGroup
+	expiryOnce  sync.Once
+	expiryStop  context.CancelFunc
 }
 
 type Conf struct {
-	DBPath              string
-	MaxOpenConns        int
-	MaxIdleConns        int
-	ConnMaxLifetimeMins int
-	ShortURLLength      int
-	BufferSize          int // Number of URLs to buffer before flush
-	FlushInterval       time.Duration
+	DBPath         string
+	ShortURLLength int
 }
 
 func New(cfg Conf, logger *slog.Logger) (*Store, error) {
+	if cfg.ShortURLLength < 1 || cfg.ShortURLLength > 128 {
+		return nil, fmt.Errorf("short URL length must be between 1 and 128")
+	}
 	db, err := sql.Open("sqlite", cfg.DBPath)
 	if err != nil {
 		return nil, err
 	}
-
-	// Configure connection pool
-	db.SetMaxOpenConns(cfg.MaxOpenConns)
-	db.SetMaxIdleConns(cfg.MaxIdleConns)
-	db.SetConnMaxLifetime(time.Duration(cfg.ConnMaxLifetimeMins) * time.Minute)
-
-	// Create tables if they don't exist
-	if err := initDB(db); err != nil {
+	// One connection keeps connection-scoped PRAGMAs consistent and serializes
+	// SQLite writes. Reads are indexed and fetch all device URLs in one query.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if _, err := db.Exec(pragmas); err != nil {
+		db.Close()
 		return nil, err
 	}
-
-	s := &Store{
-		db:          db,
-		cache:       make(map[string]models.URLData),
-		logger:      logger,
-		shortURLLen: cfg.ShortURLLength,
-		bufferSize:  cfg.BufferSize,
-		writeBuf:    make([]models.URLData, 0, cfg.BufferSize),
-		flushTicker: time.NewTicker(cfg.FlushInterval),
-		done:        make(chan struct{}),
-		flushChan:   make(chan []models.URLData, 100), // Buffer channel for pending flushes
-		workerDone:  make(chan struct{}),
+	if err := runMigrations(db, "migrations", logger); err != nil {
+		db.Close()
+		return nil, err
 	}
-
-	// Run migrations after store is initialized
-	if err := runMigrations(db, "migrations", s.logger); err != nil {
-		return nil, fmt.Errorf("failed to run migrations: %w", err)
-	}
-
-	// Start single flush worker
-	go s.flushWorker()
-
-	// Load all existing URLs into cache
+	s := &Store{db: db, logger: logger, shortURLLen: cfg.ShortURLLength, cache: make(map[string]models.URLData)}
 	if err := s.loadCache(); err != nil {
+		db.Close()
 		return nil, err
 	}
-
-	// Initialize URLs stored gauge
 	metrics.URLsStoredGauge.Set(float64(len(s.cache)))
-
 	return s, nil
 }
 
-func initDB(db *sql.DB) error {
-	// Apply PRAGMA statements first
-	if _, err := db.Exec(pragmas); err != nil {
-		return err
+func (s *Store) Close() error {
+	if s.expiryStop != nil {
+		s.expiryStop()
 	}
+	s.workers.Wait()
+	return s.db.Close()
+}
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
-	return nil
+func (s *Store) Count(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM urls`).Scan(&count)
+	return count, err
 }
 
 func (s *Store) loadCache() error {
-	rows, err := s.db.Query(`SELECT short_code, url, title, created_at, expires_at FROM urls`)
+	rows, err := s.db.Query(selectURLs)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var urlData models.URLData
-		var expiresAt sql.NullTime
-		err := rows.Scan(&urlData.ShortCode, &urlData.URL, &urlData.Title, &urlData.CreatedAt, &expiresAt)
-		if err != nil {
-			return err
-		}
-		if expiresAt.Valid {
-			urlData.ExpiresAt = &expiresAt.Time
-		}
-		s.cache[urlData.ShortCode] = urlData
-	}
-	return rows.Err()
-}
-
-func (s *Store) Close() error {
-	s.flushTicker.Stop()
-	close(s.done)
-	close(s.flushChan)
-	<-s.workerDone // Wait for worker to finish
-	return s.db.Close()
-}
-
-func (s *Store) flushWorker() {
-	defer close(s.workerDone)
-
-	for {
-		select {
-		case <-s.flushTicker.C:
-			s.triggerFlush()
-		case urls, ok := <-s.flushChan:
-			if !ok {
-				return
-			}
-			s.flushWithRetry(urls)
-		case <-s.done:
-			return
-		}
-	}
-}
-
-func (s *Store) triggerFlush() {
-	s.bufMu.Lock()
-	if len(s.writeBuf) == 0 {
-		s.bufMu.Unlock()
-		return
-	}
-
-	// Copy buffer and reset it
-	urls := make([]models.URLData, len(s.writeBuf))
-	copy(urls, s.writeBuf)
-	s.writeBuf = s.writeBuf[:0]
-	s.bufMu.Unlock()
-
-	// Send to flush channel
-	select {
-	case s.flushChan <- urls:
-	default:
-		s.logger.Warn("flush channel full, dropping batch", "count", len(urls))
-	}
-}
-
-func (s *Store) flushWithRetry(urls []models.URLData) {
-	const maxRetries = 3
-	const retryDelay = 100 * time.Millisecond
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		if err := s.doFlush(urls); err != nil {
-			if attempt < maxRetries-1 {
-				s.logger.Warn("flush failed, retrying",
-					"error", err,
-					"attempt", attempt+1,
-					"count", len(urls))
-				time.Sleep(retryDelay * time.Duration(attempt+1))
-				continue
-			}
-			s.logger.Error("flush failed after retries",
-				"error", err,
-				"count", len(urls))
-		}
-		return
-	}
-}
-
-func (s *Store) doFlush(urls []models.URLData) error {
-	tx, err := s.db.Begin()
+	urls, err := scanURLs(rows)
 	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
+		return err
 	}
-	defer tx.Rollback()
-
-	// Build a single INSERT statement with multiple VALUES clauses
-	var sb strings.Builder
-	sb.WriteString(`INSERT INTO urls (short_code, url, title, created_at, expires_at) VALUES `)
-
-	vals := make([]interface{}, 0, len(urls)*5) // 5 fields per URL
-
-	for i, urlData := range urls {
-		if i > 0 {
-			sb.WriteString(",")
-		}
-		sb.WriteString("(?,?,?,?,?)")
-
-		vals = append(vals,
-			urlData.ShortCode,
-			urlData.URL,
-			urlData.Title,
-			urlData.CreatedAt,
-			urlData.ExpiresAt,
-		)
+	for _, data := range urls {
+		s.cache[data.ShortCode] = data
 	}
-
-	// Execute single batch insert
-	if _, err := tx.Exec(sb.String(), vals...); err != nil {
-		return fmt.Errorf("batch insert: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
-	}
-
-	s.logger.Info("flushed urls to database", "count", len(urls))
 	return nil
 }
 
-func (s *Store) Ping(ctx context.Context) error {
-	return s.db.PingContext(ctx)
-}
-
-func (s *Store) CreateShortURL(ctx context.Context, url string, title string, slug string, expiry time.Duration, deviceURLs map[string]string) (string, error) {
-	var shortCode string
-
-	if slug != "" {
-		shortCode = slug
-	} else {
-		// Try to generate a unique short code
-		for {
-			shortCode = generateRandomString(s.shortURLLen)
-			s.mu.RLock()
-			_, exists := s.cache[shortCode]
-			s.mu.RUnlock()
-			if !exists {
-				break
-			}
-		}
+func (s *Store) CreateShortURL(ctx context.Context, original, title, slug string, expiry time.Duration, devices map[string]string) (string, error) {
+	if err := redirect.ValidateDestinations(original, devices); err != nil {
+		return "", err
 	}
-
-	// Check if shortCode already exists
-	s.mu.RLock()
-	_, exists := s.cache[shortCode]
-	s.mu.RUnlock()
-	if exists {
-		return "", fmt.Errorf("short code already exists")
-	}
-
-	// Calculate expiry time if provided
-	var expiresAt *time.Time
-	if expiry > 0 {
-		t := time.Now().Add(expiry)
-		expiresAt = &t
-	}
-
-	// Create URL data
-	urlData := models.URLData{
-		URL:       url,
-		Title:     title,
-		ShortCode: shortCode,
-		CreatedAt: time.Now().UTC(),
-		ExpiresAt: expiresAt,
-	}
-
-	// If we have device URLs, we need to write everything immediately to maintain consistency
-	if len(deviceURLs) > 0 {
-		// Start a transaction
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return "", fmt.Errorf("begin transaction: %w", err)
-		}
-		defer tx.Rollback()
-
-		// Insert main URL
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO urls (short_code, url, title, created_at, expires_at)
-			VALUES (?, ?, ?, ?, ?)
-		`, shortCode, url, title, urlData.CreatedAt, expiresAt)
-		if err != nil {
-			return "", fmt.Errorf("insert url: %w", err)
-		}
-
-		// Insert device URLs
-		urlData.DeviceURLs = make(map[string]models.DeviceURLData)
-		for platform, deviceURL := range deviceURLs {
-			if platform != "android" && platform != "ios" && platform != "web" {
-				continue // Skip invalid platforms
-			}
-			// Skip empty URLs
-			if deviceURL == "" {
-				continue
-			}
-			deviceURLData := models.DeviceURLData{
-				URL:       deviceURL,
-				Platform:  platform,
-				CreatedAt: time.Now().UTC(),
-			}
-			_, err = tx.ExecContext(ctx, `
-				INSERT INTO device_urls (short_code, platform, url, created_at)
-				VALUES (?, ?, ?, ?)
-			`, shortCode, platform, deviceURL, deviceURLData.CreatedAt)
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	for attempt := 0; attempt < 10; attempt++ {
+		code := slug
+		if code == "" {
+			var err error
+			code, err = generateRandomString(s.shortURLLen)
 			if err != nil {
-				return "", fmt.Errorf("insert device url: %w", err)
+				return "", err
 			}
-			urlData.DeviceURLs[platform] = deviceURLData
 		}
-
-		// Commit transaction
-		if err := tx.Commit(); err != nil {
-			return "", fmt.Errorf("commit transaction: %w", err)
+		data, err := s.create(ctx, code, original, title, expiry, devices)
+		if errors.Is(err, ErrConflict) && slug == "" {
+			continue
 		}
-
-		// Update cache
-		s.mu.Lock()
-		s.cache[shortCode] = urlData
-		metrics.URLsStoredGauge.Set(float64(len(s.cache)))
-		s.mu.Unlock()
-	} else {
-		// No device URLs, use the buffer as before
-		s.bufMu.Lock()
-		s.writeBuf = append(s.writeBuf, urlData)
-		if len(s.writeBuf) >= s.bufferSize {
-			// Buffer is full, flush it
-			s.flushChan <- s.writeBuf
-			s.writeBuf = make([]models.URLData, 0, s.bufferSize)
+		if err == nil {
+			s.mu.Lock()
+			s.cache[code] = data
+			metrics.URLsStoredGauge.Set(float64(len(s.cache)))
+			s.mu.Unlock()
 		}
-		s.bufMu.Unlock()
-
-		// Update cache immediately
-		s.mu.Lock()
-		s.cache[shortCode] = urlData
-		metrics.URLsStoredGauge.Set(float64(len(s.cache)))
-		s.mu.Unlock()
+		return code, err
 	}
-
-	return shortCode, nil
+	return "", fmt.Errorf("could not allocate an unused short code")
 }
 
-func (s *Store) GetRedirectData(ctx context.Context, shortCode string) (models.URLData, error) {
-	s.mu.RLock()
-	urlData, exists := s.cache[shortCode]
-	s.mu.RUnlock()
+func (s *Store) create(ctx context.Context, code, original, title string, expiry time.Duration, devices map[string]string) (models.URLData, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return models.URLData{}, err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC()
+	var expires *time.Time
+	if expiry > 0 {
+		end := now.Add(expiry)
+		expires = &end
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO urls (short_code, url, title, created_at, expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(short_code) DO NOTHING`, code, original, title, now, expires)
+	if err != nil {
+		return models.URLData{}, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return models.URLData{}, err
+	}
+	if n == 0 {
+		return models.URLData{}, ErrConflict
+	}
+	deviceData, err := writeDevices(ctx, tx, code, devices)
+	if err != nil {
+		return models.URLData{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return models.URLData{}, err
+	}
+	return models.URLData{URL: original, Title: title, ShortCode: code, CreatedAt: now, ExpiresAt: expires, DeviceURLs: deviceData}, nil
+}
 
+func writeDevices(ctx context.Context, tx *sql.Tx, code string, devices map[string]string) (map[string]models.DeviceURLData, error) {
+	deviceData := make(map[string]models.DeviceURLData)
+	for platform, target := range devices {
+		if target == "" {
+			continue
+		}
+		created := time.Now().UTC()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO device_urls (short_code, platform, url, created_at) VALUES (?, ?, ?, ?)`, code, platform, target, created); err != nil {
+			return nil, err
+		}
+		deviceData[platform] = models.DeviceURLData{URL: target, Platform: platform, CreatedAt: created}
+	}
+	return deviceData, nil
+}
+
+const selectURLs = `SELECT u.short_code, u.url, u.title, u.created_at, u.expires_at,
+ d.platform, d.url, d.created_at FROM urls u LEFT JOIN device_urls d ON d.short_code = u.short_code `
+
+func scanURLs(rows *sql.Rows) ([]models.URLData, error) {
+	defer rows.Close()
+	urls := make([]models.URLData, 0)
+	indices := make(map[string]int)
+	for rows.Next() {
+		var data models.URLData
+		var expires, created sql.NullTime
+		var platform, target sql.NullString
+		if err := rows.Scan(&data.ShortCode, &data.URL, &data.Title, &data.CreatedAt, &expires, &platform, &target, &created); err != nil {
+			return nil, err
+		}
+		index, exists := indices[data.ShortCode]
+		if !exists {
+			if expires.Valid {
+				data.ExpiresAt = &expires.Time
+			}
+			data.DeviceURLs = make(map[string]models.DeviceURLData)
+			index = len(urls)
+			indices[data.ShortCode] = index
+			urls = append(urls, data)
+		}
+		if platform.Valid {
+			urls[index].DeviceURLs[platform.String] = models.DeviceURLData{URL: target.String, Platform: platform.String, CreatedAt: created.Time}
+		}
+	}
+	return urls, rows.Err()
+}
+
+func (s *Store) GetRedirectData(ctx context.Context, code string) (models.URLData, error) {
+	s.mu.RLock()
+	data, exists := s.cache[code]
+	s.mu.RUnlock()
 	if !exists {
 		return models.URLData{}, ErrNotExist
 	}
-
-	if urlData.ExpiresAt != nil && time.Now().After(*urlData.ExpiresAt) {
-		// URL has expired, remove it
+	if data.ExpiresAt != nil && !time.Now().Before(*data.ExpiresAt) {
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM urls WHERE short_code = ?`, code); err != nil {
+			return models.URLData{}, err
+		}
 		s.mu.Lock()
-		delete(s.cache, shortCode)
+		delete(s.cache, code)
 		metrics.URLsStoredGauge.Set(float64(len(s.cache)))
 		s.mu.Unlock()
-		_, err := s.db.ExecContext(ctx, `DELETE FROM urls WHERE short_code = ?`, shortCode)
-		if err != nil {
-			s.logger.Error("failed to delete expired url", "error", err)
-		}
 		return models.URLData{}, ErrNotExist
 	}
-
-	// Load device-specific URLs if not already loaded
-	if urlData.DeviceURLs == nil {
-		rows, err := s.db.QueryContext(ctx, `SELECT platform, url, created_at FROM device_urls WHERE short_code = ?`, shortCode)
-		if err != nil {
-			s.logger.Error("failed to load device urls", "error", err)
-			return urlData, nil
-		}
-		defer rows.Close()
-
-		deviceURLs := make(map[string]models.DeviceURLData)
-		for rows.Next() {
-			var deviceURL models.DeviceURLData
-			err := rows.Scan(&deviceURL.Platform, &deviceURL.URL, &deviceURL.CreatedAt)
-			if err != nil {
-				s.logger.Error("failed to scan device url", "error", err)
-				continue
-			}
-			deviceURLs[deviceURL.Platform] = deviceURL
-		}
-		urlData.DeviceURLs = deviceURLs
-
-		// Update cache with device URLs
-		s.mu.Lock()
-		s.cache[shortCode] = urlData
-		s.mu.Unlock()
-	}
-
-	return urlData, nil
+	return data, nil
 }
 
-func (s *Store) DeleteURL(ctx context.Context, shortCode string) error {
-	// Delete from database
-	result, err := s.db.ExecContext(ctx, `DELETE FROM urls WHERE short_code = ?`, shortCode)
+func (s *Store) DeleteURL(ctx context.Context, code string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	result, err := s.db.ExecContext(ctx, `DELETE FROM urls WHERE short_code = ?`, code)
 	if err != nil {
 		return err
 	}
-
-	// Check if any row was affected
-	rowsAffected, err := result.RowsAffected()
+	n, err := result.RowsAffected()
 	if err != nil {
 		return err
 	}
-	if rowsAffected == 0 {
+	if n == 0 {
 		return ErrNotExist
 	}
-
-	// Delete from cache
 	s.mu.Lock()
-	delete(s.cache, shortCode)
+	delete(s.cache, code)
 	metrics.URLsStoredGauge.Set(float64(len(s.cache)))
 	s.mu.Unlock()
-
 	return nil
 }
 
-func (s *Store) UpdateURL(ctx context.Context, shortCode string, url string, title string, deviceURLs map[string]string) error {
-	// Start transaction
+func (s *Store) UpdateURL(ctx context.Context, code, original, title string, devices map[string]string) error {
+	if err := redirect.ValidateDestinations(original, devices); err != nil {
+		return err
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
+		return err
 	}
 	defer tx.Rollback()
-
-	// Update main URL
-	result, err := tx.ExecContext(ctx, `
-		UPDATE urls
-		SET url = ?, title = ?
-		WHERE short_code = ?
-	`, url, title, shortCode)
+	result, err := tx.ExecContext(ctx, `UPDATE urls SET url = ?, title = ? WHERE short_code = ?`, original, title, code)
 	if err != nil {
-		return fmt.Errorf("update url: %w", err)
+		return err
 	}
-
-	rowsAffected, err := result.RowsAffected()
+	n, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("check rows affected: %w", err)
+		return err
 	}
-	if rowsAffected == 0 {
+	if n == 0 {
 		return ErrNotExist
 	}
-
-	// Delete existing device URLs
-	_, err = tx.ExecContext(ctx, `DELETE FROM device_urls WHERE short_code = ?`, shortCode)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM device_urls WHERE short_code = ?`, code); err != nil {
+		return err
+	}
+	deviceData, err := writeDevices(ctx, tx, code, devices)
 	if err != nil {
-		return fmt.Errorf("delete device urls: %w", err)
+		return err
 	}
-
-	// Insert new device URLs
-	deviceURLData := make(map[string]models.DeviceURLData)
-	for platform, deviceURL := range deviceURLs {
-		if platform != "android" && platform != "ios" && platform != "web" {
-			continue // Skip invalid platforms
-		}
-		// Skip empty URLs
-		if deviceURL == "" {
-			continue
-		}
-		data := models.DeviceURLData{
-			URL:       deviceURL,
-			Platform:  platform,
-			CreatedAt: time.Now().UTC(),
-		}
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO device_urls (short_code, platform, url, created_at)
-			VALUES (?, ?, ?, ?)
-		`, shortCode, platform, deviceURL, data.CreatedAt)
-		if err != nil {
-			return fmt.Errorf("insert device url: %w", err)
-		}
-		deviceURLData[platform] = data
-	}
-
-	// Commit transaction
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
+		return err
 	}
-
-	// Update cache
 	s.mu.Lock()
-	if urlData, exists := s.cache[shortCode]; exists {
-		urlData.URL = url
-		urlData.Title = title
-		urlData.DeviceURLs = deviceURLData
-		s.cache[shortCode] = urlData
-	}
+	data := s.cache[code]
+	data.URL = original
+	data.Title = title
+	data.DeviceURLs = deviceData
+	s.cache[code] = data
 	s.mu.Unlock()
-
 	return nil
 }
 
 func (s *Store) GetURLs(ctx context.Context, page, perPage int64) ([]models.URLData, int64, error) {
-	offset := (page - 1) * perPage
-
-	// Get total count
+	if page < 1 || page > 1000000 || perPage < 1 || perPage > 1000 {
+		return nil, 0, fmt.Errorf("invalid pagination")
+	}
 	var total int64
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM urls`).Scan(&total)
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM urls`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.QueryContext(ctx, selectURLs+`WHERE u.short_code IN (SELECT short_code FROM urls ORDER BY created_at DESC, short_code LIMIT ? OFFSET ?) ORDER BY u.created_at DESC, u.short_code`, perPage, (page-1)*perPage)
 	if err != nil {
 		return nil, 0, err
 	}
-
-	// Get paginated URLs
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT short_code, url, title, created_at, expires_at
-		FROM urls
-		ORDER BY created_at DESC
-		LIMIT ? OFFSET ?
-	`, perPage, offset)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-
-	var urls []models.URLData
-	for rows.Next() {
-		var urlData models.URLData
-		var expiresAt sql.NullTime
-		err := rows.Scan(&urlData.ShortCode, &urlData.URL, &urlData.Title, &urlData.CreatedAt, &expiresAt)
-		if err != nil {
-			return nil, 0, err
-		}
-		if expiresAt.Valid {
-			urlData.ExpiresAt = &expiresAt.Time
-		}
-
-		// Get device URLs for this short code
-		deviceRows, err := s.db.QueryContext(ctx, `
-			SELECT platform, url, created_at
-			FROM device_urls
-			WHERE short_code = ?
-		`, urlData.ShortCode)
-		if err != nil {
-			s.logger.Error("failed to get device urls", "error", err, "shortCode", urlData.ShortCode)
-			continue
-		}
-		defer deviceRows.Close()
-
-		urlData.DeviceURLs = make(map[string]models.DeviceURLData)
-		for deviceRows.Next() {
-			var deviceURL models.DeviceURLData
-			err := deviceRows.Scan(&deviceURL.Platform, &deviceURL.URL, &deviceURL.CreatedAt)
-			if err != nil {
-				s.logger.Error("failed to scan device url", "error", err)
-				continue
-			}
-			urlData.DeviceURLs[deviceURL.Platform] = deviceURL
-		}
-		deviceRows.Close() // Close before next iteration
-
-		urls = append(urls, urlData)
-	}
-
-	return urls, total, rows.Err()
+	urls, err := scanURLs(rows)
+	return urls, total, err
 }
 
-// generateRandomString creates a random string of specified length
-func generateRandomString(length int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+func generateRandomString(length int) (string, error) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, length)
 	for i := range b {
-		b[i] = charset[rand.Int32N(int32(len(charset)))]
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return "", err
+		}
+		b[i] = alphabet[n.Int64()]
 	}
-	return string(b)
+	return string(b), nil
 }
