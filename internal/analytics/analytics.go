@@ -63,6 +63,16 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 
 	// Initialize configured providers
 	for providerName, providerConfig := range cfg.Providers {
+		if enabledValue, exists := providerConfig["enabled"]; exists {
+			enabled, ok := enabledValue.(bool)
+			if !ok {
+				return nil, fmt.Errorf("analytics provider %s enabled must be a boolean", providerName)
+			}
+			if !enabled {
+				logger.Info("skipped disabled analytics provider", "provider", providerName)
+				continue
+			}
+		}
 		dispatcher, err := initializeProvider(providerName, providerConfig, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize provider %s: %w", providerName, err)
@@ -90,27 +100,6 @@ func initializeProvider(name string, config map[string]interface{}, logger *slog
 			Timeout:  time.Duration(timeout) * time.Second,
 		}
 		return NewPlausibleDispatcher(cfg, logger)
-	case "matomo":
-		trackingURL, ok := config["tracking_url"].(string)
-		if !ok || trackingURL == "" {
-			return nil, fmt.Errorf("matomo tracking_url is required")
-		}
-		siteID, ok := config["site_id"].(int64)
-		if !ok || siteID == 0 {
-			return nil, fmt.Errorf("matomo site_id is required")
-		}
-		timeout, ok := config["timeout"].(int64)
-		if !ok || timeout == 0 {
-			return nil, fmt.Errorf("matomo timeout is required")
-		}
-		authToken, _ := config["auth_token"].(string)
-		cfg := MatomoConfig{
-			TrackingURL: trackingURL,
-			SiteID:      int(siteID),
-			AuthToken:   authToken,
-			Timeout:     time.Duration(timeout) * time.Second,
-		}
-		return NewMatomoDispatcher(cfg)
 	case "accesslog":
 		return NewAccessLogDispatcher(config, logger)
 	case "webhook":

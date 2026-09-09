@@ -40,6 +40,8 @@ num_workers = 2
 
 # Plausible Analytics integration
 [analytics.providers.plausible]
+# Enable this provider
+enabled = true
 # Plausible API endpoint for sending events
 endpoint = "http://plausible:8000/api/event"
 # Request timeout in seconds
@@ -49,22 +51,13 @@ timeout = 5
 [analytics.providers.accesslog]
 # Enable/disable access log writing
 enabled = true
-# Path to access log file
+# Optional path for JSON Lines access logs
 file_path = "access.log"
-
-# Matomo Analytics integration
-[analytics.providers.matomo]
-# Matomo tracking endpoint URL (full URL including matomo.php)
-tracking_url = "https://your-matomo-domain.example/matomo.php"
-# Your Matomo site ID
-site_id = 1
-# Optional authentication token
-auth_token = "your-matomo-auth-token"
-# Request timeout in seconds
-timeout = 5
 
 # Webhook integration
 [analytics.providers.webhook]
+# Enable this provider
+enabled = true
 # Webhook endpoint URL
 endpoint = "https://api.example.com/webhook"
 # Request timeout in seconds

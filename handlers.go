@@ -1,12 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -161,12 +164,13 @@ func (app *App) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	platform, err := redirect.Detect(r)
+	platform, detectionSource, err := redirect.DetectWithSource(r)
 	if err != nil {
 		app.sendErrorResponse(w, err.Error(), http.StatusBadRequest, nil)
 		return
 	}
 	targetURL := redirect.Destination(urlData, platform)
+	app.logRedirectDecision(r, shortCode, targetURL, platform, detectionSource)
 
 	metrics.RedirectsTotal.Inc()
 	if app.analytics != nil {
@@ -204,6 +208,33 @@ func (app *App) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Lil-Platform", string(platform))
 	w.Header().Set("Location", targetURL)
 	w.WriteHeader(http.StatusFound)
+}
+
+func (app *App) logRedirectDecision(r *http.Request, shortCode, target string, platform redirect.Platform, source redirect.DetectionSource) {
+	targetURL, err := url.Parse(target)
+	if err != nil {
+		app.logger.Error("failed to parse validated redirect destination", "error", err, "short_code", shortCode)
+		return
+	}
+	queryKeys := make([]string, 0, len(targetURL.Query()))
+	for key := range targetURL.Query() {
+		queryKeys = append(queryKeys, key)
+	}
+	sort.Strings(queryKeys)
+	targetHash := sha256.Sum256([]byte(target))
+
+	app.logger.Info("redirect selected",
+		"short_code", shortCode,
+		"platform", platform,
+		"detection_source", source,
+		"target_scheme", targetURL.Scheme,
+		"target_host", targetURL.Hostname(),
+		"target_query_keys", queryKeys,
+		"target_url_sha256", fmt.Sprintf("%x", targetHash),
+		"user_agent", r.UserAgent(),
+		"client_hint_platform", r.Header.Get("Sec-CH-UA-Platform"),
+		"cf_ray", r.Header.Get("CF-Ray"),
+	)
 }
 
 func (app *App) handleGetURLs(w http.ResponseWriter, r *http.Request) {

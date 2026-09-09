@@ -12,47 +12,59 @@ import (
 )
 
 type Platform string
+type DetectionSource string
 
 const (
 	Android Platform = "android"
 	IOS     Platform = "ios"
 	Web     Platform = "web"
+
+	SourceOverride   DetectionSource = "override"
+	SourceBot        DetectionSource = "bot"
+	SourceClientHint DetectionSource = "client_hint"
+	SourceUserAgent  DetectionSource = "user_agent"
+	SourceFallback   DetectionSource = "fallback"
 )
 
 // Detect uses an explicit override first, then rejects bots, then uses client
 // hints and the UA for human traffic.
 // An indistinguishable desktop-mode iPad is deliberately treated as web.
 func Detect(r *http.Request) (Platform, error) {
+	platform, _, err := DetectWithSource(r)
+	return platform, err
+}
+
+func DetectWithSource(r *http.Request) (Platform, DetectionSource, error) {
 	if values, present := r.URL.Query()["platform"]; present {
 		if len(values) != 1 {
-			return "", fmt.Errorf("provide exactly one platform")
+			return "", "", fmt.Errorf("provide exactly one platform")
 		}
 		switch Platform(values[0]) {
 		case Android, IOS, Web:
-			return Platform(values[0]), nil
+			return Platform(values[0]), SourceOverride, nil
 		default:
-			return "", fmt.Errorf("platform must be android, ios, or web")
+			return "", "", fmt.Errorf("platform must be android, ios, or web")
 		}
 	}
 	ua := useragent.Parse(r.UserAgent())
 	if ua.Bot {
-		return Web, nil
+		return Web, SourceBot, nil
 	}
 	switch r.Header.Get("Sec-CH-UA-Platform") {
 	case `"Android"`:
-		return Android, nil
+		return Android, SourceClientHint, nil
 	case `"iOS"`:
-		return IOS, nil
+		return IOS, SourceClientHint, nil
 	case `"Windows"`, `"macOS"`, `"Linux"`, `"Chrome OS"`:
-		return Web, nil
+		return Web, SourceClientHint, nil
 	}
 	switch {
 	case ua.IsAndroid():
-		return Android, nil
+		return Android, SourceUserAgent, nil
 	case ua.IsIOS():
-		return IOS, nil
+		return IOS, SourceUserAgent, nil
 	default:
-		return Web, nil
+		return Web, SourceFallback, nil
 	}
 }
 

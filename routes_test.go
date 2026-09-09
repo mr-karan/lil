@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mr-karan/lil/internal/redirect"
 	"github.com/mr-karan/lil/internal/store"
 )
 
@@ -84,5 +86,25 @@ func TestHTTPRedirectsAndManagement(t *testing.T) {
 	router.ServeHTTP(w, r)
 	if w.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("non-JSON content type: %d", w.Code)
+	}
+}
+
+func TestRedirectLogDoesNotExposeQueryValues(t *testing.T) {
+	var output bytes.Buffer
+	app := App{logger: slog.New(slog.NewJSONHandler(&output, nil))}
+	r := httptest.NewRequest(http.MethodGet, "/review", nil)
+	r.Header.Set("User-Agent", "ExampleApp/1")
+	app.logRedirectDecision(r, "review", "https://apps.example.com/app/id123?action=sensitive-review&token=secret", redirect.IOS, redirect.SourceUserAgent)
+
+	logLine := output.String()
+	for _, want := range []string{`"msg":"redirect selected"`, `"platform":"ios"`, `"detection_source":"user_agent"`, `"target_query_keys":["action","token"]`, `"target_url_sha256":`} {
+		if !strings.Contains(logLine, want) {
+			t.Errorf("log does not contain %s: %s", want, logLine)
+		}
+	}
+	for _, secret := range []string{"sensitive-review", "secret"} {
+		if strings.Contains(logLine, secret) {
+			t.Errorf("log exposed query value %q: %s", secret, logLine)
+		}
 	}
 }
