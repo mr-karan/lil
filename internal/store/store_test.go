@@ -30,7 +30,7 @@ func TestPersistenceAndDeviceUpdates(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	devices := map[string]string{"ios": "https://apps.apple.com/app/id1449453802?action=write-review", "web": "https://example.com/web"}
+	devices := map[string]string{"ios": "https://apps.apple.com/app/id123456789?action=write-review", "web": "https://example.com/web"}
 	if err := s.UpdateURL(ctx, "rate-us", "https://example.com/new", "updated", devices); err != nil {
 		t.Fatal(err)
 	}

@@ -22,8 +22,8 @@ func TestHTTPRedirectsAndManagement(t *testing.T) {
 	defer s.Close()
 	app := &App{store: s, logger: logger}
 	router := app.routes("test-user", "test-password")
-	ios := "https://apps.apple.com/app/id1449453802?action=write-review"
-	android := "https://play.google.com/store/apps/details?id=com.zerodha.kite3"
+	ios := "https://apps.apple.com/app/id123456789?action=write-review"
+	android := "https://play.google.com/store/apps/details?id=com.example.app"
 	if _, err := s.CreateShortURL(context.Background(), "https://example.com/choose", "", "rate-us", 0, map[string]string{"ios": ios, "android": android}); err != nil {
 		t.Fatal(err)
 	}

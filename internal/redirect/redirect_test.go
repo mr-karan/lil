@@ -31,7 +31,7 @@ func TestDetect(t *testing.T) {
 		{"duplicate override", iphone, "", "?platform=ios&platform=android", "", true},
 		{"empty override", iphone, "", "?platform=", "", true},
 		{"missing UA", "", "", "", Web, false},
-		{"unknown UA", "Kite/3", "", "", Web, false},
+		{"unknown UA", "ExampleApp/3", "", "", Web, false},
 		{"mobile bot", "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2272.96 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "", "", Web, false},
 		{"mobile bot with hint", "Mozilla/5.0 (Linux; Android 6.0.1) AppleWebKit/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", `"Android"`, "", Web, false},
 		{"explicit override for bot", "Googlebot/2.1", `"Android"`, "?platform=ios", IOS, false},
@@ -50,7 +50,7 @@ func TestDetect(t *testing.T) {
 
 func TestDestination(t *testing.T) {
 	data := models.URLData{URL: "https://example.com/fallback", DeviceURLs: map[string]models.DeviceURLData{
-		"ios": {URL: "https://apps.apple.com/app/id1449453802?action=write-review"},
+		"ios": {URL: "https://apps.apple.com/app/id123456789?action=write-review"},
 		"web": {URL: "https://example.com/choose"},
 	}}
 	if got := Destination(data, IOS); got != data.DeviceURLs["ios"].URL {
@@ -70,7 +70,7 @@ func TestValidateURL(t *testing.T) {
 			t.Errorf("accepted %q", raw)
 		}
 	}
-	if err := ValidateURL("https://apps.apple.com/app/id1449453802?action=write-review"); err != nil {
+	if err := ValidateURL("https://apps.apple.com/app/id123456789?action=write-review"); err != nil {
 		t.Fatal(err)
 	}
 }
