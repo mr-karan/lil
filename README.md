@@ -1,147 +1,61 @@
-# Lil - High-Performance URL Shortener
+# Lil
 
-Lil is a fast URL shortener built in Go, designed with scalability and extensibility in mind.
+Lil is a self-hosted URL shortener written in Go. It stores links in SQLite
+and can send iOS, Android, and desktop clicks to different destinations.
 
-## Key Features
+Lil includes:
 
-- **Storage**: Transactional SQLite writes with an in-memory redirect cache
-- **Platform-Specific Redirects**: Intelligently route users based on their device
-  - Custom redirects for iOS, Android, and web.
-  - Fallback URLs for unsupported platforms
-  - Device detection using User-Agent headers
-- **Flexible Analytics**: Supports multiple analytics providers out of the box
-  - Plausible Analytics integration
-  - Access log provider for analysis with tools like GoAccess
-  - Custom webhook support for easy integration with other services
-- **Admin UI**: Clean, responsive dashboard built with Vue.js
-- **Monitoring**: Built-in Prometheus metrics for observability
-- **URL Management**:
-  - Custom slugs support
-  - URL expiration
-  - Title and metadata storage
-  - Pagination and search in admin UI
+- transactional SQLite writes and an in-memory redirect cache
+- custom slugs, expiry times, titles, and platform destinations
+- a Vue admin UI for creating, editing, and deleting links
+- Plausible, access-log, and webhook analytics providers
+- Prometheus metrics
+- a JSON management API
 
-## Architecture Overview
+![Create a short link](docs/screenshots/2.png)
 
-- **Storage**: SQLite is the source of truth. Creates and edits commit the URL and device destinations together before updating the in-memory redirect cache.
-- **Async Analytics**: Background workers handle analytics dispatch without impacting redirect performance
-- **Extensible**: Easy to add new analytics providers through a simple interface
-- **API**: RESTful JSON API for programmatic access
-- **Metrics**: Prometheus metrics for redirects, failures, mutations, and stored URLs.
+![Dashboard in light mode](docs/screenshots/3.png)
 
----
+![Dashboard in dark mode](docs/screenshots/4.png)
 
-![Dashboard](docs/screenshots/2.png)
-*Create URL*
+## Start a local server
 
-![Dashboard Light](docs/screenshots/3.png)
-*Dashboard*
-
-![Dashboard Dark](docs/screenshots/4.png)
-*Dark Mode*
-
----
-
-## Getting Started
-
-### Local development
-
-Requirements: Go 1.26+, Node 22.12+ (Node 24 recommended), pnpm 11.3.0,
-and tmux. Run commands from the repository root.
+You need Go 1.26 or newer, Node 22.12 or newer, pnpm 11.3.0, and tmux.
+Use Node 24 when possible.
 
 ```sh
-make dev          # Build, then start API and hot-reloading Vue UI
-make dev-logs     # Recent logs
-make dev-attach   # Live terminals; Ctrl-b d detaches
-make dev-restart  # Rebuild the backend after Go changes
-make dev-stop     # Stop the dev processes
-make check       # Race tests, vet, staticcheck, Vue type checks, ESLint
+make dev
 ```
 
-Open **http://localhost:5173/admin/**. Local development has no login and
-binds to loopback. Redirects and the API use **http://localhost:17000**.
-Data lives in `.dev/urls.db`, independently of `config.toml` and `urls.db`.
-Analytics is disabled in `dev/local.toml`. Frontend edits hot reload;
-Go edits require `make dev-restart`. `make clean` preserves the dev database.
+Open <http://localhost:5173/admin/>. The API and short links use
+<http://localhost:17000>. Local data stays in `.dev/urls.db`. The local
+configuration disables authentication and analytics.
 
-For a production-style local build, use `make run CONFIG=dev/local.toml`
-after stopping the dev API. The embedded UI is at port 17000 `/admin/`.
+The development server binds to loopback. It does not expose the admin UI or
+database to other computers on your network.
 
-### Platform redirects
+Useful commands:
 
-The server selects the platform in this order:
+| Command | Purpose |
+|---|---|
+| `make dev-logs` | Show recent API and UI logs |
+| `make dev-attach` | Attach to both tmux windows |
+| `make dev-restart` | Rebuild and restart after a Go change |
+| `make dev-stop` | Stop the development server |
+| `make check` | Run tests, static analysis, type checks, and lint checks |
+| `make clean` | Clean build output without deleting the local database |
 
-1. Explicit `?platform=android`, `?platform=ios`, or `?platform=web`.
-   Empty, repeated, and unsupported overrides return 400.
-2. Recognized crawler User-Agents use Web, regardless of client hints.
-3. A recognized, quoted `Sec-CH-UA-Platform` client hint.
-4. User-Agent parsing, then Web for unknown or missing device information.
+Vite reloads frontend changes. Run `make dev-restart` after a Go change.
 
-The selected device destination overrides the original URL. If that device
-destination is absent or empty, the original URL is used. Request query
-parameters are not appended to destinations; saved destination queries such
-as `action=write-review` are preserved exactly.
+## Configure Lil
 
-An iPad in desktop mode can be indistinguishable from a Mac. The server does
-not guess based on `Macintosh`. Use an explicit platform link when the caller
-knows the device, or make Web a page with App Store and Play Store buttons.
-An override chooses a saved destination only; it cannot supply a new URL.
+Copy the sample before you run a release binary:
 
-Redirect responses use HTTP 302, `Cache-Control: private, no-store`, and
-`Vary: User-Agent, Sec-CH-UA-Platform`. Configure proxies/CDNs to respect those
-headers. Browser and OS policies still determine whether a store app opens;
-a redirect cannot guarantee a native review prompt.
-
-### Upgrade notes
-
-- Go and npm dependencies are updated and locked. Vite 8, Tailwind 4, and
-  daisyUI 5 require modern browsers. TypeScript stays on 6.0.3 because the
-  current vue-tsc release does not support TypeScript 7's compiler layout.
-- Existing SQLite migrations and tables are preserved. The old write buffer,
-  connection pool and flush settings are no longer used. SQLite uses one
-  persistent connection with WAL and synchronous commits. Redirect reads remain
-  in memory, while acknowledged writes are durable and immediately update the
-  cache.
-- Basic Auth now protects management APIs as well as the admin UI when both
-  admin credentials are configured. API clients and metrics scrapers must
-  send credentials. The health endpoint and public short links remain public.
-- `/admin` redirects to `/admin/`. Use the trailing slash for the portal.
-- Create and update reject invalid destinations and unknown device keys.
-  Only absolute HTTP(S) destinations without embedded credentials are accepted.
-- The dashboard preserves Web overrides and copies links using `app.public_url`.
-
-### Using Docker
-
-The easiest way to run Lil is using Docker:
-
-```bash
-docker run -p 7000:7000 \
-  -v $(pwd)/config.toml:/app/config.toml \
-  -v $(pwd)/urls.db:/app/urls.db \
-  ghcr.io/mr-karan/lil:latest
+```sh
+cp config.sample.toml config.toml
 ```
 
-### Using Docker Compose
-
-A complete example with persistent storage:
-
-```bash
-docker compose up -d
-```
-
-The sample Compose setup binds to loopback and is for local evaluation. Supply
-an authenticated configuration and a production ingress for deployment.
-
-### Manual Installation
-
-1. Download the latest release
-2. Configure via `config.toml`
-3. Run the binary
-4. Access admin UI at `/admin`
-
-## Configuration
-
-See `config.toml` for all available options. Key sections:
+At minimum, review these settings:
 
 ```toml
 [server]
@@ -150,78 +64,138 @@ address = ":7000"
 [db]
 path = "urls.db"
 
-[analytics]
-enabled = true
-num_workers = 2
-
-[analytics.providers.plausible]
-endpoint = "http://plausible:8000/api/event"
-```
-
-## API Documentation
-
-See `docs/api.md` for detailed API documentation.
-
-## Domain Setup
-
-Lil supports running on separate domains for public URL shortening and admin interface:
-
-### Configuration
-
-1. Set your public domain in `config.toml`:
-```toml
 [app]
-public_url = "https://lil.io"  # Base URL for shortened URLs
+short_url_length = 6
+public_url = "https://links.example.com"
+
+[admin]
+username = "admin"
+password = "replace-this-password"
+
+[analytics]
+enabled = false
+num_workers = 2
 ```
 
-### Architecture
+`app.public_url` is the base URL that Lil shows and copies in the admin UI.
+Set both admin credentials to protect the admin UI, management API, and
+metrics endpoint. If both values are empty, Lil disables Basic Auth. Do not
+run that configuration on a public network.
 
-The application can be deployed with two separate domains. For eg the following config can be referred for production deployments:
+See [`config.sample.toml`](config.sample.toml) for the analytics provider
+settings. When you enable analytics, Lil starts every provider table in the
+configuration unless that table contains `enabled = false`. Delete provider
+tables that you do not use.
 
-### Nginx Configuration Example
+## Route by platform
 
-```ini
-# Public URL shortener
-server {
-    listen 80;
-    server_name lil.io;
+A link can store four destinations:
 
-    # Block access to admin interface and API
-    location ~ ^/(admin|api) {
-        return 403;
-    }
+- the original URL, which is always required
+- an Android URL
+- an iOS URL
+- a Web URL
 
-    # Forward everything else to the application
-    location / {
-        proxy_pass http://localhost:7000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
+Clients should normally share the plain short link, such as
+`https://links.example.com/rate-us`. Lil selects a platform for each click.
+It uses this order:
 
-# Admin interface
-server {
-    listen 80;
-    server_name liladmin.internal;
+1. Use `?platform=android`, `?platform=ios`, or `?platform=web` when present.
+2. Send recognized crawlers to Web.
+3. Use a quoted `Sec-CH-UA-Platform` client hint when available.
+4. Parse the User-Agent header.
+5. Use Web when the client remains unknown.
 
-    # Only allow internal network access
-    allow 10.0.0.0/8;
-    allow 172.16.0.0/12;
-    allow 192.168.0.0/16;
-    deny all;
+If the selected platform has no destination, Lil uses the original URL. It
+does not append query parameters from the short link to the destination.
+Queries saved in a destination, such as `?action=write-review`, stay intact.
 
-    location / {
-        proxy_pass http://localhost:7000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
+The platform query parameter is an override for testing and callers that
+already know the device. Email and website links should usually omit it.
+Lil rejects empty, repeated, and unknown platform values with HTTP 400.
+
+An iPad in desktop mode can send the same `Macintosh` User-Agent as a Mac.
+Lil treats this request as Web because the server cannot distinguish the two.
+Use a store-choice page as the Web destination when this case matters.
+
+Redirects return HTTP 302 with these headers:
+
+```text
+Cache-Control: private, no-store
+Vary: User-Agent
+Vary: Sec-CH-UA-Platform
 ```
+
+Your proxy or CDN must respect these headers. The browser and operating
+system decide whether a store URL opens an app or a web page.
+
+Each successful redirect writes a structured `redirect selected` log entry.
+The entry includes the short code, platform, detection source, destination
+host, destination query keys, User-Agent, Cloudflare Ray ID, and a SHA-256 hash
+of the full destination. Lil does not log destination query values.
+
+## Run with Docker Compose
+
+The included Compose file starts Lil on loopback and stores the database in a
+named volume.
+
+```sh
+docker compose up -d
+```
+
+Open <http://localhost:7000/admin/>. This configuration is for local testing.
+It has no admin password and enables only access-log analytics.
+
+For a production deployment, provide your own `config.toml`, set admin
+credentials, use a reverse proxy for TLS, and restrict `/admin/` and
+`/api/` as needed. Run one Lil process for each SQLite database. Separate
+processes do not share redirect-cache updates.
+
+## Run a release binary
+
+Download an archive from [GitHub Releases](https://github.com/mr-karan/lil/releases),
+extract it, and run:
+
+```sh
+./lil.bin --config=config.toml
+```
+
+The binary embeds the admin UI. Open `/admin/` on the configured server
+address.
+
+## API
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/{shortCode}` | Redirect a public short link |
+| `GET` | `/api/v1/health` | Check SQLite connectivity |
+| `GET` | `/api/v1` | Read the version and public URL |
+| `POST` | `/api/v1/shorten` | Create a link |
+| `GET` | `/api/v1/urls` | List links |
+| `PUT` | `/api/v1/urls/{shortCode}` | Update a link |
+| `DELETE` | `/api/v1/urls/{shortCode}` | Delete a link |
+| `GET` | `/api/v1/metrics` | Read Prometheus metrics |
+
+The health endpoint and short links are public. If you set admin credentials,
+Lil applies Basic Auth to the other API routes. POST and PUT requests require
+`Content-Type: application/json`. Lil limits request bodies to 1 MiB.
+
+See [`docs/api.md`](docs/api.md) for request and response examples.
+
+## Storage and shutdown
+
+SQLite is the source of truth. Lil commits a link and its platform
+destinations in one transaction. It updates the redirect cache only after the
+commit succeeds.
+
+Lil uses WAL mode and synchronous commits. It handles `SIGINT` and `SIGTERM`,
+stops accepting requests, waits for analytics workers, and then closes the
+database.
 
 ## License
 
-[LICENSE](./LICENSE)
+See [`LICENSE`](LICENSE).
 
 ## Contributing
 
-Contributions welcome! Please read our contributing guidelines before submitting PRs.
+Bug reports and focused pull requests are welcome.
