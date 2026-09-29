@@ -5,8 +5,15 @@
         <a class="btn btn-ghost text-xl">Lil Admin</a>
         <a href="/admin/" class="btn btn-ghost">Create</a>
         <a href="/admin/dashboard" class="btn btn-ghost">Dashboard</a>
+        <a href="/admin/activity" class="btn btn-ghost">Activity</a>
+        <a href="/admin/tokens" class="btn btn-ghost">Tokens</a>
+        <a href="/admin/users" class="btn btn-ghost">Users</a>
       </div>
-      <div class="flex-none">
+      <div class="flex-none flex items-center gap-4">
+        <span v-if="currentUser" class="text-sm">{{ currentUser.email }}</span>
+        <form method="post" action="/auth/logout">
+          <button type="submit" class="btn btn-sm">Sign out</button>
+        </form>
         <label class="swap swap-rotate">
           <input
             type="checkbox"
@@ -42,6 +49,9 @@
 <script setup lang="ts">
 import { RouterView } from 'vue-router'
 import { ref, onMounted } from 'vue'
+import { getMe, type User } from './api'
+
+const currentUser = ref<User | null>(null)
 
 const isDarkTheme = ref(false)
 
@@ -59,7 +69,13 @@ function toggleTheme(event: Event) {
     setTheme(event.currentTarget.checked)
 }
 
-onMounted(() => {
+onMounted(async () => {
+  try {
+    currentUser.value = await getMe()
+  } catch (error) {
+    console.error('Failed to load current user:', error)
+  }
+
   // Check localStorage first, then system preference
   const savedTheme = localStorage.getItem('theme')
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches

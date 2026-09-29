@@ -9,6 +9,11 @@ export default defineConfig(({ mode }) => {
     base: '/admin/',
     plugins: [vue(), tailwindcss()],
     resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
-    server: { proxy: { '/api': { target: env.API_URL || 'http://localhost:7000' } } },
+    server: {
+      proxy: {
+        '/api': { target: env.API_URL || 'http://localhost:7000' },
+        '/auth': { target: env.API_URL || 'http://localhost:7000' },
+      },
+    },
   }
 })

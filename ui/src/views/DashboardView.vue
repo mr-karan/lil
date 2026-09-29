@@ -44,6 +44,8 @@
                 <th class="w-32">Title</th>
                 <th class="w-1/3">Device URLs</th>
                 <th class="w-40">Created At</th>
+                <th class="w-40">Created By</th>
+                <th class="w-40">Last Edited</th>
                 <th class="w-40">Expires At</th>
                 <th class="w-24">Actions</th>
               </tr>
@@ -96,10 +98,26 @@
                   {{ formatDate(url.created_at) }}
                 </td>
                 <td class="whitespace-nowrap">
+                  {{ displayName(url.created_by) }}
+                </td>
+                <td class="whitespace-nowrap">
+                  <template v-if="url.updated_at">
+                    {{ displayName(url.updated_by) }}<br />
+                    <span class="text-xs">{{ formatDate(url.updated_at) }}</span>
+                  </template>
+                  <span v-else>-</span>
+                </td>
+                <td class="whitespace-nowrap">
                   {{ url.expires_at ? formatDate(url.expires_at) : 'Never' }}
                 </td>
                 <td class="whitespace-nowrap">
                   <div class="flex gap-2">
+                    <a
+                      class="btn btn-sm"
+                      :href="`/admin/activity?short_code=${encodeURIComponent(url.short_code)}`"
+                    >
+                      History
+                    </a>
                     <button
                       class="btn btn-sm"
                       aria-label="Copy short URL"
@@ -303,7 +321,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { request, type ShortURL, type URLEdit } from '../api'
+import { request, displayName, formatDate, type ShortURL, type URLEdit } from '../api'
 
 const urls = ref<ShortURL[]>([])
 const errorMessage = ref('')
@@ -375,10 +393,6 @@ function changePage(page: number) {
 function handlePerPageChange() {
   currentPage.value = 1 // Reset to first page when changing items per page
   fetchUrls(1)
-}
-
-function formatDate(dateString: string) {
-  return new Date(dateString).toLocaleString()
 }
 
 async function copyShortUrl(shortCode: string) {
