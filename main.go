@@ -13,6 +13,7 @@ import (
 
 	"github.com/knadh/koanf/v2"
 	"github.com/mr-karan/lil/internal/analytics"
+	"github.com/mr-karan/lil/internal/auth"
 	"github.com/mr-karan/lil/internal/store"
 )
 
@@ -52,24 +53,22 @@ func run() error {
 
 	app.store = store
 
-	// Initialize analytics manager.
-	providers := make(map[string]map[string]interface{})
-	if providersRaw := ko.Get("analytics.providers"); providersRaw != nil {
-		providerValues, ok := providersRaw.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("analytics.providers must be a table")
-		}
-		for provider, config := range providerValues {
-			if configMap, ok := config.(map[string]interface{}); ok {
-				providers[provider] = configMap
+	// Initialize analytics manager. The [analytics] section is optional.
+	analyticsConfig := analytics.Config{Enabled: ko.Bool("analytics.enabled")}
+	if analyticsConfig.Enabled {
+		analyticsConfig.NumWorkers = ko.MustInt("analytics.num_workers")
+		analyticsConfig.Providers = make(map[string]map[string]interface{})
+		if providersRaw := ko.Get("analytics.providers"); providersRaw != nil {
+			providerValues, ok := providersRaw.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("analytics.providers must be a table")
+			}
+			for provider, config := range providerValues {
+				if configMap, ok := config.(map[string]interface{}); ok {
+					analyticsConfig.Providers[provider] = configMap
+				}
 			}
 		}
-	}
-
-	analyticsConfig := analytics.Config{
-		Enabled:    ko.Bool("analytics.enabled"),
-		NumWorkers: ko.MustInt("analytics.num_workers"),
-		Providers:  providers,
 	}
 
 	analyticsManager, err := analytics.NewManager(analyticsConfig, app.logger)
@@ -88,13 +87,23 @@ func run() error {
 		}()
 	}
 
-	username, password := ko.String("admin.username"), ko.String("admin.password")
-	if (username == "") != (password == "") {
-		return fmt.Errorf("admin username and password must either both be set or both be empty")
+	authn, err := auth.New(context.Background(), auth.Config{
+		Mode:            auth.Mode(ko.String("auth.mode")),
+		DevEmail:        ko.String("auth.dev_email"),
+		SessionLifetime: ko.Duration("auth.session_lifetime"),
+		IssuerURL:       ko.String("auth.oidc.issuer_url"),
+		ClientID:        ko.String("auth.oidc.client_id"),
+		ClientSecret:    ko.String("auth.oidc.client_secret"),
+		RedirectURL:     ko.String("auth.oidc.redirect_url"),
+		AllowedDomains:  ko.Strings("auth.oidc.allowed_domains"),
+		AllowedEmails:   ko.Strings("auth.oidc.allowed_emails"),
+	}, app.store, app.logger)
+	if err != nil {
+		return fmt.Errorf("initialize auth: %w", err)
 	}
 	server := &http.Server{
 		Addr:              ko.MustString("server.address"),
-		Handler:           app.routes(username, password),
+		Handler:           app.routes(authn),
 		ReadTimeout:       ko.MustDuration("server.read_timeout"),
 		WriteTimeout:      ko.MustDuration("server.write_timeout"),
 		IdleTimeout:       ko.MustDuration("server.idle_timeout"),

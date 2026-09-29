@@ -4,12 +4,16 @@ go 1.26.0
 
 require (
 	github.com/VictoriaMetrics/metrics v1.44.0
+	github.com/alexedwards/scs/v2 v2.9.0
+	github.com/coreos/go-oidc/v3 v3.21.0
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/knadh/koanf/parsers/toml v0.1.0
 	github.com/knadh/koanf/providers/file v1.2.1
 	github.com/knadh/koanf/providers/posflag v1.0.2
 	github.com/knadh/koanf/v2 v2.3.6
 	github.com/spf13/pflag v1.0.10
+	golang.org/x/oauth2 v0.37.0
 	modernc.org/sqlite v1.58.0
 )
 

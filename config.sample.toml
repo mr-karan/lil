@@ -24,12 +24,28 @@ short_url_length = 6
 # Base URL used for generating shortened links
 public_url = "https://lil.io"
 
-# Admin interface authentication
-[admin]
-# Username for accessing admin interface
-username = "admin"
-# Password for accessing admin interface
-password = "changeme"
+# Authentication
+[auth]
+# "oidc" for real deployments. "dev" signs every request in as dev_email: local testing only.
+mode = "oidc"
+# How long a browser session lasts.
+session_lifetime = "168h"
+# Used only when mode = "dev".
+dev_email = "dev@example.com"
+
+[auth.oidc]
+issuer_url = "https://accounts.google.com"
+client_id = "your-client-id"
+# Leave empty for a PKCE-only public client.
+client_secret = "your-client-secret"
+# Must match the redirect URI registered with the IdP.
+redirect_url = "https://lil.example.com/auth/oidc"
+# Required. Every person allowed to sign in, by full email. There is no self
+# sign-up: only this list grants access.
+allowed_emails = ["you@example.com"]
+# Optional extra check. When set, a listed email must also be in one of these
+# domains (on Google, the signed hd claim at sign-in). Leave empty to skip.
+allowed_domains = []
 
 # Analytics configuration
 [analytics]

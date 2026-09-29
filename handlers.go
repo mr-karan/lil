@@ -13,8 +13,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mr-karan/lil/internal/analytics"
+	"github.com/mr-karan/lil/internal/auth"
 	"github.com/mr-karan/lil/internal/metrics"
 	"github.com/mr-karan/lil/internal/redirect"
 	"github.com/mr-karan/lil/internal/store"
@@ -103,6 +105,10 @@ func (app *App) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) handleShortenURL(w http.ResponseWriter, r *http.Request) {
+	actor, ok := app.actorFrom(w, r)
+	if !ok {
+		return
+	}
 	// Parse request body
 	var req shortenURLRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -124,7 +130,7 @@ func (app *App) handleShortenURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call store method to create short URL with device URLs
-	shortCode, err := app.store.CreateShortURL(r.Context(), req.URL, req.Title, req.Slug, expiry, req.DeviceURLs)
+	shortCode, err := app.store.CreateShortURL(r.Context(), actor, req.URL, req.Title, req.Slug, expiry, req.DeviceURLs)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			app.sendErrorResponse(w, err.Error(), http.StatusConflict, nil)
@@ -237,29 +243,24 @@ func (app *App) logRedirectDecision(r *http.Request, shortCode, target string, p
 	)
 }
 
-func (app *App) handleGetURLs(w http.ResponseWriter, r *http.Request) {
-	// Get pagination parameters from query string
-	page := r.URL.Query().Get("page")
-	perPage := r.URL.Query().Get("per_page")
-
-	// Convert to int64 with defaults
-	pageNum := int64(1)
-	if page != "" {
-		if p, err := strconv.ParseInt(page, 10, 64); err == nil {
-			pageNum = p
-		}
+func (app *App) pagination(w http.ResponseWriter, r *http.Request) (page, perPage int64, ok bool) {
+	page, perPage = 1, 10
+	if v, err := strconv.ParseInt(r.URL.Query().Get("page"), 10, 64); err == nil {
+		page = v
 	}
-
-	perPageNum := int64(10)
-	if perPage != "" {
-		if pp, err := strconv.ParseInt(perPage, 10, 64); err == nil {
-			perPageNum = pp
-		}
+	if v, err := strconv.ParseInt(r.URL.Query().Get("per_page"), 10, 64); err == nil {
+		perPage = v
 	}
-
-	// Fetch URLs from store
-	if pageNum < 1 || pageNum > 1000000 || perPageNum < 1 || perPageNum > 1000 {
+	if page < 1 || page > 1000000 || perPage < 1 || perPage > 1000 {
 		app.sendErrorResponse(w, "page must be 1..1000000 and per_page 1..1000", http.StatusBadRequest, nil)
+		return 0, 0, false
+	}
+	return page, perPage, true
+}
+
+func (app *App) handleGetURLs(w http.ResponseWriter, r *http.Request) {
+	pageNum, perPageNum, ok := app.pagination(w, r)
+	if !ok {
 		return
 	}
 	urls, total, err := app.store.GetURLs(r.Context(), pageNum, perPageNum)
@@ -279,6 +280,10 @@ func (app *App) handleGetURLs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) handleUpdateURL(w http.ResponseWriter, r *http.Request) {
+	actor, ok := app.actorFrom(w, r)
+	if !ok {
+		return
+	}
 	// Extract shortCode from path
 	shortCode := r.PathValue("shortCode")
 	if shortCode == "" {
@@ -301,7 +306,7 @@ func (app *App) handleUpdateURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update URL in store
-	if err := app.store.UpdateURL(r.Context(), shortCode, req.URL, req.Title, req.DeviceURLs); err != nil {
+	if err := app.store.UpdateURL(r.Context(), actor, shortCode, req.URL, req.Title, req.DeviceURLs); err != nil {
 		if err == store.ErrNotExist {
 			app.sendErrorResponse(w, "URL not found", http.StatusNotFound, nil)
 			return
@@ -315,6 +320,10 @@ func (app *App) handleUpdateURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) handleDeleteURL(w http.ResponseWriter, r *http.Request) {
+	actor, ok := app.actorFrom(w, r)
+	if !ok {
+		return
+	}
 	// Extract shortCode from path
 	shortCode := r.PathValue("shortCode")
 	if shortCode == "" {
@@ -323,7 +332,7 @@ func (app *App) handleDeleteURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Delete URL from store
-	if err := app.store.DeleteURL(r.Context(), shortCode); err != nil {
+	if err := app.store.DeleteURL(r.Context(), actor, shortCode); err != nil {
 		if err == store.ErrNotExist {
 			app.sendErrorResponse(w, "URL not found", http.StatusNotFound, nil)
 			return
@@ -336,4 +345,149 @@ func (app *App) handleDeleteURL(w http.ResponseWriter, r *http.Request) {
 	// Return success with no content
 	metrics.URLsDeletedTotal.Inc()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// actorFrom returns the authenticated actor. RequireAPI always sets one, so a
+// missing actor is a wiring bug.
+func (app *App) actorFrom(w http.ResponseWriter, r *http.Request) (store.Actor, bool) {
+	actor, ok := auth.ActorFrom(r.Context())
+	if !ok {
+		app.logger.Error("request reached a handler without an authenticated actor", "path", r.URL.Path)
+		app.sendErrorResponse(w, "Internal server error", http.StatusInternalServerError, nil)
+	}
+	return actor, ok
+}
+
+func (app *App) handleMe(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.UserFrom(r.Context())
+	if !ok {
+		app.sendErrorResponse(w, "Internal server error", http.StatusInternalServerError, nil)
+		return
+	}
+	app.sendResponse(w, user)
+}
+
+func (app *App) handleListUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := app.store.ListUsers(r.Context())
+	if err != nil {
+		app.logger.Error("Failed to list users", "error", err)
+		app.sendErrorResponse(w, "Failed to list users", http.StatusInternalServerError, nil)
+		return
+	}
+	app.sendResponse(w, users)
+}
+
+func (app *App) handleDisableUser(w http.ResponseWriter, r *http.Request) {
+	app.setUserDisabled(w, r, true)
+}
+
+func (app *App) handleEnableUser(w http.ResponseWriter, r *http.Request) {
+	app.setUserDisabled(w, r, false)
+}
+
+func (app *App) setUserDisabled(w http.ResponseWriter, r *http.Request, disabled bool) {
+	actor, ok := app.actorFrom(w, r)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		app.sendErrorResponse(w, "Invalid user id", http.StatusBadRequest, nil)
+		return
+	}
+	if disabled && store.UserID(id) == actor.UserID {
+		app.sendErrorResponse(w, "you cannot disable yourself", http.StatusBadRequest, nil)
+		return
+	}
+	if err := app.store.SetUserDisabled(r.Context(), actor, store.UserID(id), disabled); err != nil {
+		if errors.Is(err, store.ErrUserNotExist) {
+			app.sendErrorResponse(w, "User not found", http.StatusNotFound, nil)
+			return
+		}
+		app.logger.Error("Failed to update user", "error", err, "user_id", id)
+		app.sendErrorResponse(w, "Internal server error", http.StatusInternalServerError, nil)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (app *App) handleListTokens(w http.ResponseWriter, r *http.Request) {
+	actor, ok := app.actorFrom(w, r)
+	if !ok {
+		return
+	}
+	tokens, err := app.store.ListAPITokens(r.Context(), actor.UserID)
+	if err != nil {
+		app.logger.Error("Failed to list API tokens", "error", err)
+		app.sendErrorResponse(w, "Failed to list API tokens", http.StatusInternalServerError, nil)
+		return
+	}
+	app.sendResponse(w, tokens)
+}
+
+func (app *App) handleCreateToken(w http.ResponseWriter, r *http.Request) {
+	actor, ok := app.actorFrom(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		app.sendErrorResponse(w, "Invalid request body", http.StatusBadRequest, nil)
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if n := utf8.RuneCountInString(name); n < 1 || n > 64 {
+		app.sendErrorResponse(w, "name must be 1 to 64 characters", http.StatusBadRequest, nil)
+		return
+	}
+	plaintext, token, err := app.store.CreateAPIToken(r.Context(), actor, name)
+	if err != nil {
+		app.logger.Error("Failed to create API token", "error", err)
+		app.sendErrorResponse(w, "Failed to create API token", http.StatusInternalServerError, nil)
+		return
+	}
+	app.sendResponse(w, map[string]interface{}{"token": plaintext, "api_token": token})
+}
+
+func (app *App) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
+	actor, ok := app.actorFrom(w, r)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		app.sendErrorResponse(w, "Invalid token id", http.StatusBadRequest, nil)
+		return
+	}
+	if err := app.store.RevokeAPIToken(r.Context(), actor, store.TokenID(id)); err != nil {
+		if errors.Is(err, store.ErrTokenNotExist) {
+			app.sendErrorResponse(w, "Token not found", http.StatusNotFound, nil)
+			return
+		}
+		app.logger.Error("Failed to revoke API token", "error", err, "token_id", id)
+		app.sendErrorResponse(w, "Internal server error", http.StatusInternalServerError, nil)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (app *App) handleListAudit(w http.ResponseWriter, r *http.Request) {
+	page, perPage, ok := app.pagination(w, r)
+	if !ok {
+		return
+	}
+	entries, total, err := app.store.ListAudit(r.Context(), r.URL.Query().Get("short_code"), page, perPage)
+	if err != nil {
+		app.logger.Error("Failed to list audit entries", "error", err)
+		app.sendErrorResponse(w, "Failed to list audit entries", http.StatusInternalServerError, nil)
+		return
+	}
+	app.sendResponse(w, map[string]interface{}{
+		"entries":  entries,
+		"page":     page,
+		"per_page": perPage,
+		"count":    total,
+	})
 }

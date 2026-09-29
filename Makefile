@@ -46,7 +46,7 @@ dev: build ## Start API and hot-reloading Vue UI in isolated tmux
 		tmux -S "$$LIL_TMUX_SOCKET" new-session -d -s lil-dev -n api -c "$(CURDIR)" '$(MAKE) dev-api'; \
 		tmux -S "$$LIL_TMUX_SOCKET" new-window -t lil-dev -n ui -c "$(CURDIR)" '$(MAKE) dev-ui'; \
 	fi
-	@echo 'Admin: http://localhost:5173/admin/ (local dev, no login)'
+	@echo 'Admin: http://localhost:5173/admin/ (dev mode, signed in as dev@example.com)'
 	@echo 'API/redirects: http://localhost:17000 | Database: .dev/urls.db'
 	@echo 'Use make dev-logs, make dev-attach, or make dev-stop.'
 

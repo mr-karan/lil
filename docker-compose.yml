@@ -39,6 +39,10 @@ configs:
       short_url_length = 6
       public_url = "http://localhost:7000"
 
+      [auth]
+      mode = "dev"
+      dev_email = "dev@example.com"
+
       [analytics]
       enabled = true
       num_workers = 2

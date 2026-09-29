@@ -23,6 +23,9 @@ func (s *Store) StartExpiryWorker(ctx context.Context) {
 					if err := s.removeExpiredURLs(workerCtx); err != nil {
 						s.logger.Error("failed to remove expired URLs", "error", err)
 					}
+					if _, err := s.db.ExecContext(workerCtx, `DELETE FROM sessions WHERE expiry < julianday('now')`); err != nil {
+						s.logger.Error("failed to remove expired sessions", "error", err)
+					}
 				}
 			}
 		})

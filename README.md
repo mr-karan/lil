@@ -8,6 +8,8 @@ Lil includes:
 - transactional SQLite writes and an in-memory redirect cache
 - custom slugs, expiry times, titles, and platform destinations
 - a Vue admin UI for creating, editing, and deleting links
+- OIDC sign-in for many users, with per-link attribution and an activity log
+- per-user API tokens for scripts
 - Plausible, access-log, and webhook analytics providers
 - Prometheus metrics
 - a JSON management API
@@ -29,7 +31,8 @@ make dev
 
 Open <http://localhost:5173/admin/>. The API and short links use
 <http://localhost:17000>. Local data stays in `.dev/urls.db`. The local
-configuration disables authentication and analytics.
+configuration signs every request in as `dev@example.com` (`auth.mode = "dev"`)
+and disables analytics.
 
 The development server binds to loopback. It does not expose the admin UI or
 database to other computers on your network.
@@ -68,9 +71,15 @@ path = "urls.db"
 short_url_length = 6
 public_url = "https://links.example.com"
 
-[admin]
-username = "admin"
-password = "replace-this-password"
+[auth]
+mode = "oidc"
+
+[auth.oidc]
+issuer_url = "https://accounts.google.com"
+client_id = "your-client-id"
+client_secret = "your-client-secret"
+redirect_url = "https://links.example.com/auth/oidc"
+allowed_emails = ["you@example.com"]
 
 [analytics]
 enabled = false
@@ -78,14 +87,141 @@ num_workers = 2
 ```
 
 `app.public_url` is the base URL that Lil shows and copies in the admin UI.
-Set both admin credentials to protect the admin UI, management API, and
-metrics endpoint. If both values are empty, Lil disables Basic Auth. Do not
-run that configuration on a public network.
 
-See [`config.sample.toml`](config.sample.toml) for the analytics provider
-settings. When you enable analytics, Lil starts every provider table in the
-configuration unless that table contains `enabled = false`. Delete provider
-tables that you do not use.
+The `[analytics]` section is optional. Lil reads `num_workers` and the provider
+tables only when `analytics.enabled` is `true`. See
+[`config.sample.toml`](config.sample.toml) for the provider settings. When you
+enable analytics, Lil starts every provider table in the configuration unless
+that table contains `enabled = false`. Delete provider tables that you do not
+use.
+
+## Authentication
+
+Every signed-in person is an admin. Lil has no roles. Lil records who created,
+updated, or deleted each link, and keeps an append-only activity log.
+
+Lil has no unauthenticated mode. `auth.mode` must be `oidc` or `dev`. Lil
+refuses to start if the `auth` settings are incomplete.
+
+### Sign in with OIDC
+
+Humans sign in through your identity provider (IdP). Lil stores no passwords.
+Lil creates the user record on the first sign-in of a listed email. There is
+no self sign-up.
+
+1. Register an OAuth client with your IdP. Add `<admin host>/auth/oidc` as
+   the redirect URI, for example `https://lil.example.com/auth/oidc`. For
+   Google, create an OAuth client of type "Web application". For Zitadel,
+   create a "Web" application and use the code flow.
+2. Set `auth.oidc.issuer_url`, `client_id`, and `redirect_url`. Set
+   `client_secret` for a confidential client. `redirect_url` must be the exact
+   redirect URI and its path must be `/auth/oidc`.
+3. Lil always uses PKCE (S256). `client_secret` is optional. Leave it empty
+   for a public client that relies on PKCE alone. Lil then sends `client_id`
+   in the token request body and no secret. Your IdP must allow the `none`
+   token endpoint auth method for that client.
+4. Set `allowed_emails` to every person who may sign in. Lil refuses to start
+   without it. The list is strict: a person may sign in only when the IdP has
+   verified their email and the lowercased email is on the list.
+   `allowed_domains` is optional. When you set it, the email domain must also
+   be on that list. Both checks must pass. Lil never admits a person because
+   of a domain alone.
+
+Example for a Zitadel-style issuer with a public client:
+
+```toml
+[auth.oidc]
+issuer_url = "https://auth.example.com"
+client_id = "your-client-id"
+client_secret = ""
+redirect_url = "https://lil.example.com/auth/oidc"
+allowed_emails = ["you@example.com"]
+```
+
+`issuer_url` and `redirect_url` must use `https://`. Lil accepts `http://` only
+for `localhost` and loopback addresses, for local IdP testing. Behind a TLS
+proxy, set `redirect_url` to the external `https://` URL. The proxy must
+preserve the `Host` header, because Lil's cross-origin check compares the
+`Origin` header of browser writes with `Host`. The session cookie is `Secure`
+when `redirect_url` uses `https://`.
+
+When `issuer_url` is `https://accounts.google.com` and `allowed_domains` is
+set, Lil checks the domain against the signed `hd` (hosted domain) claim of the
+ID token. An address in `allowed_domains` on a consumer Google account is not
+enough: the sign-in fails without a matching `hd`. The email must still be in
+`allowed_emails`. Lil checks `hd` at sign-in only. On later requests, Lil checks
+the domain of the stored email.
+
+Lil checks the current allowlist on every request, with the same rule as at
+sign-in. If you remove an email or a domain from the configuration and restart
+Lil, the affected users lose access
+to sessions and API tokens.
+
+Limits to know:
+
+- One deployment uses one issuer. Lil rejects users, sessions, and tokens from
+  any other issuer.
+- Lil does not link accounts by email. A different issuer or subject with the
+  same email is a different user.
+- Suspending a person at the IdP does not end their Lil sessions or API tokens.
+  Disable the user in Lil (the Users page or `POST /api/v1/users/{id}/disable`).
+  Disabling ends every session and revokes every API token of that user at
+  once. Enabling the user again does not restore them.
+- API tokens carry full admin power. Treat them like passwords.
+- If nobody can sign in, add your email to `allowed_emails` and restart Lil.
+
+### API tokens
+
+Scripts authenticate with a per-user API token:
+
+```sh
+curl -H "Authorization: Bearer lil_..." https://links.example.com/api/v1/urls
+```
+
+Create and revoke tokens on the Tokens page or with `/api/v1/tokens`. Lil shows
+the token once, when you create it. A request with an `Authorization` header
+uses only that token: Lil never falls back to a browser session.
+
+Prometheus scrapes `/api/v1/metrics` with a token:
+
+```yaml
+scrape_configs:
+  - job_name: lil
+    metrics_path: /api/v1/metrics
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials: lil_...
+    static_configs:
+      - targets: ["links.example.com"]
+```
+
+The scrape token belongs to a user. If you disable that user, scraping stops.
+Create the token for a person or team account that outlives individual staff.
+
+### Development mode
+
+`auth.mode = "dev"` signs every request in as `auth.dev_email`. Lil logs a
+warning at startup. Use it on loopback for local work only. Never point dev mode
+at a production database. Dev users and their tokens carry the issuer `dev`, and
+an `oidc` deployment rejects them.
+
+### Upgrade from Basic Auth
+
+Versions before OIDC sign-in used one shared `[admin]` username and password.
+To upgrade:
+
+1. Back up the SQLite database. The new version runs a schema migration when
+   it starts.
+2. Delete the `[admin]` section and add `[auth]` as described above. Lil
+   ignores `[admin]`.
+3. Deploy, then sign in once through the IdP.
+4. Create an API token for each script that used Basic Auth, and change the
+   script to send `Authorization: Bearer <token>`. Basic Auth no longer works.
+
+Links created before the upgrade have no recorded creator. The dashboard shows
+them without one. Lil starts recording attribution from the first change after
+the upgrade.
 
 ## Route by platform
 
@@ -144,10 +280,11 @@ docker compose up -d
 ```
 
 Open <http://localhost:7000/admin/>. This configuration is for local testing.
-It has no admin password and enables only access-log analytics.
+It runs in dev mode (`auth.mode = "dev"`), so it signs every request in as
+`dev@example.com` with no login. It enables only access-log analytics.
 
-For a production deployment, provide your own `config.toml`, set admin
-credentials, use a reverse proxy for TLS, and restrict `/admin/` and
+For a production deployment, provide your own `config.toml` with
+`auth.mode = "oidc"`, use a reverse proxy for TLS, and restrict `/admin/` and
 `/api/` as needed. Run one Lil process for each SQLite database. Separate
 processes do not share redirect-cache updates.
 
@@ -175,10 +312,18 @@ address.
 | `PUT` | `/api/v1/urls/{shortCode}` | Update a link |
 | `DELETE` | `/api/v1/urls/{shortCode}` | Delete a link |
 | `GET` | `/api/v1/metrics` | Read Prometheus metrics |
+| `GET` | `/api/v1/me` | Read the signed-in user |
+| `GET` | `/api/v1/users` | List users |
+| `POST` | `/api/v1/users/{id}/disable` | Disable a user (not yourself) |
+| `POST` | `/api/v1/users/{id}/enable` | Enable a user |
+| `GET` | `/api/v1/tokens` | List your API tokens |
+| `POST` | `/api/v1/tokens` | Create an API token |
+| `DELETE` | `/api/v1/tokens/{id}` | Revoke your API token |
+| `GET` | `/api/v1/audit` | Read the activity log |
 
-The health endpoint and short links are public. If you set admin credentials,
-Lil applies Basic Auth to the other API routes. POST and PUT requests require
-`Content-Type: application/json`. Lil limits request bodies to 1 MiB.
+The health endpoint and short links are public. Every other API route needs an
+API token (`Authorization: Bearer lil_...`) or a browser session. POST and
+PUT requests with a body require `Content-Type: application/json`. Lil limits request bodies to 1 MiB.
 
 See [`docs/api.md`](docs/api.md) for request and response examples.
 

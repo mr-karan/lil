@@ -101,7 +101,7 @@ func (s *Store) loadCache() error {
 	return nil
 }
 
-func (s *Store) CreateShortURL(ctx context.Context, original, title, slug string, expiry time.Duration, devices map[string]string) (string, error) {
+func (s *Store) CreateShortURL(ctx context.Context, actor Actor, original, title, slug string, expiry time.Duration, devices map[string]string) (string, error) {
 	if err := redirect.ValidateDestinations(original, devices); err != nil {
 		return "", err
 	}
@@ -116,7 +116,7 @@ func (s *Store) CreateShortURL(ctx context.Context, original, title, slug string
 				return "", err
 			}
 		}
-		data, err := s.create(ctx, code, original, title, expiry, devices)
+		data, err := s.create(ctx, actor, code, original, title, expiry, devices)
 		if errors.Is(err, ErrConflict) && slug == "" {
 			continue
 		}
@@ -131,7 +131,7 @@ func (s *Store) CreateShortURL(ctx context.Context, original, title, slug string
 	return "", fmt.Errorf("could not allocate an unused short code")
 }
 
-func (s *Store) create(ctx context.Context, code, original, title string, expiry time.Duration, devices map[string]string) (models.URLData, error) {
+func (s *Store) create(ctx context.Context, actor Actor, code, original, title string, expiry time.Duration, devices map[string]string) (models.URLData, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return models.URLData{}, err
@@ -143,7 +143,7 @@ func (s *Store) create(ctx context.Context, code, original, title string, expiry
 		end := now.Add(expiry)
 		expires = &end
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO urls (short_code, url, title, created_at, expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(short_code) DO NOTHING`, code, original, title, now, expires)
+	result, err := tx.ExecContext(ctx, `INSERT INTO urls (short_code, url, title, created_at, expires_at, created_by) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(short_code) DO NOTHING`, code, original, title, now, expires, actor.UserID)
 	if err != nil {
 		return models.URLData{}, err
 	}
@@ -154,33 +154,40 @@ func (s *Store) create(ctx context.Context, code, original, title string, expiry
 	if n == 0 {
 		return models.URLData{}, ErrConflict
 	}
-	deviceData, err := writeDevices(ctx, tx, code, devices)
+	if err := writeDevices(ctx, tx, code, devices); err != nil {
+		return models.URLData{}, err
+	}
+	data, err := readURL(ctx, tx, code)
 	if err != nil {
+		return models.URLData{}, err
+	}
+	if err := writeAudit(ctx, tx, actor, ActionURLCreate, code, nil, snapshotURL(data)); err != nil {
 		return models.URLData{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return models.URLData{}, err
 	}
-	return models.URLData{URL: original, Title: title, ShortCode: code, CreatedAt: now, ExpiresAt: expires, DeviceURLs: deviceData}, nil
+	return data, nil
 }
 
-func writeDevices(ctx context.Context, tx *sql.Tx, code string, devices map[string]string) (map[string]models.DeviceURLData, error) {
-	deviceData := make(map[string]models.DeviceURLData)
+func writeDevices(ctx context.Context, tx *sql.Tx, code string, devices map[string]string) error {
 	for platform, target := range devices {
 		if target == "" {
 			continue
 		}
-		created := time.Now().UTC()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO device_urls (short_code, platform, url, created_at) VALUES (?, ?, ?, ?)`, code, platform, target, created); err != nil {
-			return nil, err
+		if _, err := tx.ExecContext(ctx, `INSERT INTO device_urls (short_code, platform, url, created_at) VALUES (?, ?, ?, ?)`, code, platform, target, time.Now().UTC()); err != nil {
+			return err
 		}
-		deviceData[platform] = models.DeviceURLData{URL: target, Platform: platform, CreatedAt: created}
 	}
-	return deviceData, nil
+	return nil
 }
 
-const selectURLs = `SELECT u.short_code, u.url, u.title, u.created_at, u.expires_at,
- d.platform, d.url, d.created_at FROM urls u LEFT JOIN device_urls d ON d.short_code = u.short_code `
+const selectURLs = `SELECT u.short_code, u.url, u.title, u.created_at, u.expires_at, u.updated_at,
+ cb.id, cb.email, cb.name, ub.id, ub.email, ub.name,
+ d.platform, d.url, d.created_at FROM urls u
+ LEFT JOIN users cb ON cb.id = u.created_by
+ LEFT JOIN users ub ON ub.id = u.updated_by
+ LEFT JOIN device_urls d ON d.short_code = u.short_code `
 
 func scanURLs(rows *sql.Rows) ([]models.URLData, error) {
 	defer rows.Close()
@@ -188,15 +195,27 @@ func scanURLs(rows *sql.Rows) ([]models.URLData, error) {
 	indices := make(map[string]int)
 	for rows.Next() {
 		var data models.URLData
-		var expires, created sql.NullTime
-		var platform, target sql.NullString
-		if err := rows.Scan(&data.ShortCode, &data.URL, &data.Title, &data.CreatedAt, &expires, &platform, &target, &created); err != nil {
+		var expires, updated, created sql.NullTime
+		var creatorID, updaterID sql.NullInt64
+		var creatorEmail, creatorName, updaterEmail, updaterName, platform, target sql.NullString
+		if err := rows.Scan(&data.ShortCode, &data.URL, &data.Title, &data.CreatedAt, &expires, &updated,
+			&creatorID, &creatorEmail, &creatorName, &updaterID, &updaterEmail, &updaterName,
+			&platform, &target, &created); err != nil {
 			return nil, err
 		}
 		index, exists := indices[data.ShortCode]
 		if !exists {
 			if expires.Valid {
 				data.ExpiresAt = &expires.Time
+			}
+			if updated.Valid {
+				data.UpdatedAt = &updated.Time
+			}
+			if creatorID.Valid {
+				data.CreatedBy = &models.UserRef{ID: creatorID.Int64, Email: creatorEmail.String, Name: creatorName.String}
+			}
+			if updaterID.Valid {
+				data.UpdatedBy = &models.UserRef{ID: updaterID.Int64, Email: updaterEmail.String, Name: updaterName.String}
 			}
 			data.DeviceURLs = make(map[string]models.DeviceURLData)
 			index = len(urls)
@@ -208,6 +227,21 @@ func scanURLs(rows *sql.Rows) ([]models.URLData, error) {
 		}
 	}
 	return urls, rows.Err()
+}
+
+func readURL(ctx context.Context, tx *sql.Tx, code string) (models.URLData, error) {
+	rows, err := tx.QueryContext(ctx, selectURLs+`WHERE u.short_code = ?`, code)
+	if err != nil {
+		return models.URLData{}, err
+	}
+	urls, err := scanURLs(rows)
+	if err != nil {
+		return models.URLData{}, err
+	}
+	if len(urls) == 0 {
+		return models.URLData{}, ErrNotExist
+	}
+	return urls[0], nil
 }
 
 func (s *Store) GetRedirectData(ctx context.Context, code string) (models.URLData, error) {
@@ -232,19 +266,26 @@ func (s *Store) GetRedirectData(ctx context.Context, code string) (models.URLDat
 	return data, nil
 }
 
-func (s *Store) DeleteURL(ctx context.Context, code string) error {
+func (s *Store) DeleteURL(ctx context.Context, actor Actor, code string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	result, err := s.db.ExecContext(ctx, `DELETE FROM urls WHERE short_code = ?`, code)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	n, err := result.RowsAffected()
+	defer tx.Rollback()
+	before, err := readURL(ctx, tx, code)
 	if err != nil {
 		return err
 	}
-	if n == 0 {
-		return ErrNotExist
+	if _, err := tx.ExecContext(ctx, `DELETE FROM urls WHERE short_code = ?`, code); err != nil {
+		return err
+	}
+	if err := writeAudit(ctx, tx, actor, ActionURLDelete, code, snapshotURL(before), nil); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	delete(s.cache, code)
@@ -253,7 +294,7 @@ func (s *Store) DeleteURL(ctx context.Context, code string) error {
 	return nil
 }
 
-func (s *Store) UpdateURL(ctx context.Context, code, original, title string, devices map[string]string) error {
+func (s *Store) UpdateURL(ctx context.Context, actor Actor, code, original, title string, devices map[string]string) error {
 	if err := redirect.ValidateDestinations(original, devices); err != nil {
 		return err
 	}
@@ -264,33 +305,31 @@ func (s *Store) UpdateURL(ctx context.Context, code, original, title string, dev
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE urls SET url = ?, title = ? WHERE short_code = ?`, original, title, code)
+	before, err := readURL(ctx, tx, code)
 	if err != nil {
 		return err
 	}
-	n, err := result.RowsAffected()
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE urls SET url = ?, title = ?, updated_by = ?, updated_at = ? WHERE short_code = ?`, original, title, actor.UserID, time.Now().UTC(), code); err != nil {
 		return err
-	}
-	if n == 0 {
-		return ErrNotExist
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM device_urls WHERE short_code = ?`, code); err != nil {
 		return err
 	}
-	deviceData, err := writeDevices(ctx, tx, code, devices)
+	if err := writeDevices(ctx, tx, code, devices); err != nil {
+		return err
+	}
+	after, err := readURL(ctx, tx, code)
 	if err != nil {
+		return err
+	}
+	if err := writeAudit(ctx, tx, actor, ActionURLUpdate, code, snapshotURL(before), snapshotURL(after)); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	data := s.cache[code]
-	data.URL = original
-	data.Title = title
-	data.DeviceURLs = deviceData
-	s.cache[code] = data
+	s.cache[code] = after
 	s.mu.Unlock()
 	return nil
 }
