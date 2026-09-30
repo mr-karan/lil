@@ -20,19 +20,23 @@ import (
 	"github.com/mr-karan/lil/internal/store"
 )
 
-const testClientID = "client-id"
+const (
+	testClientID    = "client-id"
+	testAccessToken = "access-token-value"
+)
 
 // fakeIdP is the only mock in this package: an external OIDC provider.
 type fakeIdP struct {
 	*httptest.Server
 	key *rsa.PrivateKey
 
-	mu          sync.Mutex
-	nonce       string
-	overrides   map[string]any
-	errorStatus int
-	errorBody   string
-	lastToken   tokenRequest
+	mu           sync.Mutex
+	nonce        string
+	overrides    map[string]any
+	errorStatus  int
+	errorBody    string
+	lastToken    tokenRequest
+	userInfoHits int
 }
 
 type tokenRequest struct {
@@ -53,6 +57,7 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 			"issuer":                                f.URL,
 			"authorization_endpoint":                f.URL + "/authorize",
 			"token_endpoint":                        f.URL + "/token",
+			"userinfo_endpoint":                     f.URL + "/userinfo",
 			"jwks_uri":                              f.URL + "/jwks",
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 		})
@@ -61,6 +66,7 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 		json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"}}})
 	})
 	mux.HandleFunc("POST /token", f.serveToken)
+	mux.HandleFunc("GET /userinfo", f.serveUserInfo)
 	f.Server = httptest.NewServer(mux)
 	t.Cleanup(f.Close)
 	return f
@@ -103,7 +109,25 @@ func (f *fakeIdP) serveToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"access_token": "at", "token_type": "Bearer", "id_token": idToken})
+	json.NewEncoder(w).Encode(map[string]any{"access_token": testAccessToken, "token_type": "Bearer", "id_token": idToken})
+}
+
+func (f *fakeIdP) serveUserInfo(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.userInfoHits++
+	f.mu.Unlock()
+	if r.Header.Get("Authorization") != "Bearer "+testAccessToken {
+		http.Error(w, "bad token", http.StatusUnauthorized)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"sub": "sub-1", "email": "alice@example.com", "email_verified": true, "name": "Alice"})
+}
+
+func (f *fakeIdP) userInfoCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.userInfoHits
 }
 
 func (f *fakeIdP) set(nonce string, overrides map[string]any) {

@@ -150,6 +150,7 @@ type Authenticator struct {
 	sessions   *scs.SessionManager
 	devUserID  store.UserID
 	oauth      *oauth2.Config
+	provider   *oidc.Provider
 	verifier   *oidc.IDTokenVerifier
 	httpClient *http.Client
 }
@@ -197,6 +198,7 @@ func New(ctx context.Context, cfg Config, st *store.Store, logger *slog.Logger) 
 	if err != nil {
 		return nil, fmt.Errorf("discover OIDC provider: %w", err)
 	}
+	a.provider = provider
 	endpoint := provider.Endpoint()
 	if cfg.ClientSecret == "" {
 		endpoint.AuthStyle = oauth2.AuthStyleInParams

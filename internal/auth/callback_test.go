@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -254,5 +257,65 @@ func TestCallbackDoesNotLogExchangeDetails(t *testing.T) {
 		if strings.HasPrefix(body, "{") && !strings.Contains(logs, "error_code=invalid_grant") {
 			t.Fatalf("missing RFC 6749 error code: %s", logs)
 		}
+	}
+}
+
+func newDebugFixture(t *testing.T, level slog.Level) *fixture {
+	t.Helper()
+	fx := newFixture(t, nil)
+	fx.logs.Reset()
+	fx.authn.logger = slog.New(slog.NewJSONHandler(fx.logs, &slog.HandlerOptions{Level: level}))
+	return fx
+}
+
+func TestCallbackDebugLogsClaimShape(t *testing.T) {
+	fx := newDebugFixture(t, slog.LevelDebug)
+	start := fx.startLogin("/admin/")
+	if w := fx.finishLogin(start, nil); w.Code != http.StatusSeeOther {
+		t.Fatalf("callback: %d %s", w.Code, w.Body.String())
+	}
+
+	lines := map[string]map[string]any{}
+	for _, line := range strings.Split(strings.TrimSpace(fx.logs.String()), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		lines[rec["msg"].(string)] = rec
+	}
+	idLine, infoLine := lines["oidc id token claims"], lines["oidc userinfo claims"]
+	if idLine == nil || infoLine == nil {
+		t.Fatalf("missing claim log lines: %s", fx.logs.String())
+	}
+	if got, want := fmt.Sprint(idLine["claims"]), "[aud email email_verified exp iat iss name nonce sub]"; got != want {
+		t.Errorf("id token claims = %s, want %s", got, want)
+	}
+	if got, want := fmt.Sprint(infoLine["claims"]), "[email email_verified name sub]"; got != want {
+		t.Errorf("userinfo claims = %s, want %s", got, want)
+	}
+	for name, rec := range lines {
+		if rec["email_domain"] != "example.com" || rec["email_verified"] != true || rec["email_verified_type"] != "bool" || rec["has_name"] != true || rec["has_hd"] != false {
+			t.Errorf("%s attrs: %v", name, rec)
+		}
+	}
+	if infoLine["sub_matches_id_token"] != true {
+		t.Errorf("sub_matches_id_token = %v", infoLine["sub_matches_id_token"])
+	}
+
+	logs := fx.logs.String()
+	for _, secret := range []string{"alice@example.com", "Alice", testAccessToken, "code=abc", "abc&", "sub-1", start.state, start.nonce} {
+		if strings.Contains(logs, secret) {
+			t.Errorf("logs leak %q: %s", secret, logs)
+		}
+	}
+}
+
+func TestCallbackInfoLevelSkipsUserInfo(t *testing.T) {
+	fx := newDebugFixture(t, slog.LevelInfo)
+	if w := fx.finishLogin(fx.startLogin("/admin/"), nil); w.Code != http.StatusSeeOther {
+		t.Fatalf("callback: %d %s", w.Code, w.Body.String())
+	}
+	if n := fx.idp.userInfoCalls(); n != 0 {
+		t.Fatalf("userinfo called %d times at info level", n)
 	}
 }
