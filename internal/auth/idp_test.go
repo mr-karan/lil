@@ -23,6 +23,8 @@ import (
 const (
 	testClientID    = "client-id"
 	testAccessToken = "access-token-value"
+
+	userInfoErrorBody = "userinfo-body-sentinel"
 )
 
 // fakeIdP is the only mock in this package: an external OIDC provider.
@@ -30,13 +32,15 @@ type fakeIdP struct {
 	*httptest.Server
 	key *rsa.PrivateKey
 
-	mu           sync.Mutex
-	nonce        string
-	overrides    map[string]any
-	errorStatus  int
-	errorBody    string
-	lastToken    tokenRequest
-	userInfoHits int
+	mu             sync.Mutex
+	nonce          string
+	overrides      map[string]any
+	errorStatus    int
+	errorBody      string
+	lastToken      tokenRequest
+	userInfoHits   int
+	userInfoStatus int
+	userInfoClaims map[string]any
 }
 
 type tokenRequest struct {
@@ -120,8 +124,26 @@ func (f *fakeIdP) serveUserInfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad token", http.StatusUnauthorized)
 		return
 	}
+	f.mu.Lock()
+	status, claims := f.userInfoStatus, f.userInfoClaims
+	f.mu.Unlock()
+	if status != 0 {
+		http.Error(w, userInfoErrorBody, status)
+		return
+	}
+	if claims == nil {
+		claims = map[string]any{"sub": "sub-1", "email": "alice@example.com", "email_verified": true, "name": "Alice"}
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"sub": "sub-1", "email": "alice@example.com", "email_verified": true, "name": "Alice"})
+	json.NewEncoder(w).Encode(claims)
+}
+
+// setUserInfo controls the userinfo response. A non-zero status returns an error
+// carrying userInfoErrorBody. Otherwise claims (including sub) are the JSON body.
+func (f *fakeIdP) setUserInfo(status int, claims map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.userInfoStatus, f.userInfoClaims = status, claims
 }
 
 func (f *fakeIdP) userInfoCalls() int {

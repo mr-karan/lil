@@ -149,7 +149,6 @@ func TestCallbackRejections(t *testing.T) {
 		{"expired", map[string]any{"exp": past}, 400, "id token verification failed"},
 		{"missing subject", map[string]any{"sub": nil}, 400, "id token claims invalid"},
 		{"email not verified", map[string]any{"email_verified": false}, 403, "email not verified"},
-		{"email_verified absent", map[string]any{"email_verified": nil}, 403, "email not verified"},
 		{"disallowed domain", map[string]any{"email": "mallory@evil.com"}, 403, "email not allowed"},
 		{"suffix domain", map[string]any{"email": "mallory@notexample.com", "exp": future}, 403, "email not allowed"},
 	} {
@@ -317,5 +316,78 @@ func TestCallbackInfoLevelSkipsUserInfo(t *testing.T) {
 	}
 	if n := fx.idp.userInfoCalls(); n != 0 {
 		t.Fatalf("userinfo called %d times at info level", n)
+	}
+}
+
+var noEmailClaims = map[string]any{"email": nil, "email_verified": nil, "name": nil}
+
+func TestCallbackUserInfoFallback(t *testing.T) {
+	fx := newFixture(t, nil)
+	fx.idp.setUserInfo(0, map[string]any{"sub": "sub-1", "email": "bob@example.com", "email_verified": true, "name": "Bob"})
+	if w := fx.finishLogin(fx.startLogin("/admin/"), noEmailClaims); w.Code != http.StatusSeeOther {
+		t.Fatalf("callback: %d %s", w.Code, w.Body.String())
+	}
+	if n := fx.idp.userInfoCalls(); n != 1 {
+		t.Fatalf("userinfo calls = %d, want 1", n)
+	}
+	if bob := fx.userByEmail("bob@example.com"); bob.Name != "Bob" {
+		t.Fatalf("user name = %q, want Bob", bob.Name)
+	}
+}
+
+func TestCallbackUserInfoFallbackWhenOnlyEmailVerifiedMissing(t *testing.T) {
+	fx := newFixture(t, nil)
+	if w := fx.finishLogin(fx.startLogin("/admin/"), map[string]any{"email_verified": nil}); w.Code != http.StatusSeeOther {
+		t.Fatalf("callback: %d %s", w.Code, w.Body.String())
+	}
+	if n := fx.idp.userInfoCalls(); n != 1 {
+		t.Fatalf("userinfo calls = %d, want 1", n)
+	}
+}
+
+func TestCallbackUserInfoRejections(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		status   int
+		claims   map[string]any
+		wantCode int
+		reason   string
+	}{
+		{"subject mismatch", 0, map[string]any{"sub": "sub-2", "email": "alice@example.com", "email_verified": true}, 400, "userinfo subject mismatch"},
+		{"server error", 500, nil, 400, "userinfo request failed"},
+		{"email not verified", 0, map[string]any{"sub": "sub-1", "email": "alice@example.com", "email_verified": false}, 403, "email not verified"},
+		{"email_verified absent", 0, map[string]any{"sub": "sub-1", "email": "alice@example.com"}, 403, "email not verified"},
+		{"email absent", 0, map[string]any{"sub": "sub-1", "email_verified": true}, 403, "email not allowed"},
+		{"email not allowed", 0, map[string]any{"sub": "sub-1", "email": "mallory@evil.com", "email_verified": true}, 403, "email not allowed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newFixture(t, nil)
+			fx.idp.setUserInfo(tt.status, tt.claims)
+			w := fx.finishLogin(fx.startLogin("/admin/"), noEmailClaims)
+			if w.Code != tt.wantCode {
+				t.Fatalf("status %d, want %d: %s", w.Code, tt.wantCode, w.Body.String())
+			}
+			logs := fx.logs.String()
+			if !strings.Contains(logs, "reason=\""+tt.reason+"\"") {
+				t.Fatalf("log missing reason %q: %s", tt.reason, logs)
+			}
+			if strings.Contains(logs, userInfoErrorBody) || strings.Contains(w.Body.String(), userInfoErrorBody) {
+				t.Fatalf("userinfo response body leaked: %s", logs)
+			}
+			users, err := fx.store.ListUsers(t.Context())
+			if err != nil || len(users) != 0 {
+				t.Fatalf("rejected login must not create a user: %v %v", users, err)
+			}
+		})
+	}
+}
+
+func TestCallbackSkipsUserInfoWhenIDTokenHasClaims(t *testing.T) {
+	fx := newDebugFixture(t, slog.LevelInfo)
+	if w := fx.finishLogin(fx.startLogin("/admin/"), nil); w.Code != http.StatusSeeOther {
+		t.Fatalf("callback: %d %s", w.Code, w.Body.String())
+	}
+	if n := fx.idp.userInfoCalls(); n != 0 {
+		t.Fatalf("userinfo called %d times", n)
 	}
 }

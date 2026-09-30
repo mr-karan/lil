@@ -108,6 +108,9 @@ refuses to start if the `auth` settings are incomplete.
 Humans sign in through your identity provider (IdP). Lil stores no passwords.
 Lil creates the user record on the first sign-in of a listed email. There is
 no self sign-up.
+Lil reads `email`, `email_verified`, and `name` from the ID token. If the ID
+token lacks them, Lil asks the userinfo endpoint, which must return the same
+subject.
 
 1. Register an OAuth client with your IdP. Add `<admin host>/auth/oidc` as
    the redirect URI, for example `https://lil.example.com/auth/oidc`. For

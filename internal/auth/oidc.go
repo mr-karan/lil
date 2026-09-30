@@ -124,26 +124,32 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if a.logger.Enabled(ctx, slog.LevelDebug) {
 		a.logIDPClaims(ctx, token, idToken)
 	}
-	var claims struct {
-		Email         string `json:"email"`
-		EmailVerified bool   `json:"email_verified"`
-		Name          string `json:"name"`
-		HostedDomain  string `json:"hd"`
-	}
+	var claims idpClaims
 	if err := idToken.Claims(&claims); err != nil || idToken.Subject == "" {
 		a.reject(w, http.StatusBadRequest, "id token claims invalid")
 		return
 	}
-	if !claims.EmailVerified {
+	if !claims.hasEmailIdentity() {
+		var reason string
+		if claims, reason = a.userInfoClaims(ctx, token, idToken.Subject); reason != "" {
+			a.reject(w, http.StatusBadRequest, reason)
+			return
+		}
+	}
+	if claims.EmailVerified == nil || !*claims.EmailVerified {
 		a.reject(w, http.StatusForbidden, "email not verified")
 		return
 	}
-	if !a.cfg.admit(claims.Email, claims.HostedDomain) {
+	email := ""
+	if claims.Email != nil {
+		email = *claims.Email
+	}
+	if !a.cfg.admit(email, claims.HostedDomain) {
 		a.reject(w, http.StatusForbidden, "email not allowed")
 		return
 	}
 
-	user, err := a.store.UpsertOIDCUser(ctx, a.cfg.IssuerURL, idToken.Subject, claims.Email, claims.Name)
+	user, err := a.store.UpsertOIDCUser(ctx, a.cfg.IssuerURL, idToken.Subject, email, claims.Name)
 	if errors.Is(err, store.ErrUserDisabled) {
 		a.reject(w, http.StatusForbidden, "user disabled")
 		return
@@ -161,6 +167,35 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	a.sessions.Put(ctx, sessionUserID, int64(user.ID))
 	a.sessions.Put(ctx, sessionEpoch, user.SessionEpoch)
 	http.Redirect(w, r, next, http.StatusSeeOther)
+}
+
+// idpClaims are the profile claims Lil reads. Pointers make absence detectable.
+type idpClaims struct {
+	Email         *string `json:"email"`
+	EmailVerified *bool   `json:"email_verified"`
+	Name          string  `json:"name"`
+	HostedDomain  string  `json:"hd"`
+}
+
+func (c idpClaims) hasEmailIdentity() bool {
+	return c.Email != nil && c.EmailVerified != nil
+}
+
+// userInfoClaims reads the claims from the userinfo endpoint. OIDC Core lets an
+// IdP return them only there. It returns a fixed rejection reason on failure.
+func (a *Authenticator) userInfoClaims(ctx context.Context, token *oauth2.Token, subject string) (idpClaims, string) {
+	info, err := a.provider.UserInfo(ctx, oauth2.StaticTokenSource(token))
+	if err != nil {
+		return idpClaims{}, "userinfo request failed"
+	}
+	if info.Subject != subject {
+		return idpClaims{}, "userinfo subject mismatch"
+	}
+	var claims idpClaims
+	if err := info.Claims(&claims); err != nil {
+		return idpClaims{}, "userinfo request failed"
+	}
+	return claims, ""
 }
 
 // logIDPClaims logs the shape of the claims the IdP sends, never their values.
