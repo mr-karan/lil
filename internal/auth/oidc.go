@@ -6,10 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
-	"fmt"
-	"log/slog"
 	"net/http"
-	"slices"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/mr-karan/lil/internal/store"
@@ -121,9 +118,6 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		a.reject(w, http.StatusBadRequest, "nonce mismatch")
 		return
 	}
-	if a.logger.Enabled(ctx, slog.LevelDebug) {
-		a.logIDPClaims(ctx, token, idToken)
-	}
 	var claims idpClaims
 	if err := idToken.Claims(&claims); err != nil || idToken.Subject == "" {
 		a.reject(w, http.StatusBadRequest, "id token claims invalid")
@@ -196,56 +190,4 @@ func (a *Authenticator) userInfoClaims(ctx context.Context, token *oauth2.Token,
 		return idpClaims{}, "userinfo request failed"
 	}
 	return claims, ""
-}
-
-// logIDPClaims logs the shape of the claims the IdP sends, never their values.
-// It must not change the login outcome.
-func (a *Authenticator) logIDPClaims(ctx context.Context, token *oauth2.Token, idToken *oidc.IDToken) {
-	var idClaims map[string]any
-	if err := idToken.Claims(&idClaims); err != nil {
-		a.logger.Debug("oidc id token claims", "reason", "claims not decodable")
-	} else {
-		a.logger.Debug("oidc id token claims", claimShape(idClaims)...)
-	}
-
-	info, err := a.provider.UserInfo(ctx, oauth2.StaticTokenSource(token))
-	if err != nil {
-		a.logger.Debug("oidc userinfo failed", "reason", "userinfo request failed")
-		return
-	}
-	var infoClaims map[string]any
-	if err := info.Claims(&infoClaims); err != nil {
-		a.logger.Debug("oidc userinfo failed", "reason", "claims not decodable")
-		return
-	}
-	a.logger.Debug("oidc userinfo claims", append(claimShape(infoClaims), "sub_matches_id_token", info.Subject == idToken.Subject)...)
-}
-
-// claimShape describes a claim set by name and type. email_verified is the only
-// value logged as is; the email is reduced to its domain.
-func claimShape(claims map[string]any) []any {
-	names := make([]string, 0, len(claims))
-	for name := range claims {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-
-	emailVerified, emailVerifiedType := any("absent"), "absent"
-	if v, ok := claims["email_verified"]; ok {
-		emailVerified, emailVerifiedType = v, fmt.Sprintf("%T", v)
-	}
-	domain := "absent"
-	if email, ok := claims["email"].(string); ok {
-		domain = emailDomain(email)
-	}
-	_, hasName := claims["name"]
-	_, hasHD := claims["hd"]
-	return []any{
-		"claims", names,
-		"email_verified", emailVerified,
-		"email_verified_type", emailVerifiedType,
-		"email_domain", domain,
-		"has_name", hasName,
-		"has_hd", hasHD,
-	}
 }
