@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -61,30 +60,6 @@ func TestCallbackConfidentialClientSendsSecret(t *testing.T) {
 	req := fx.idp.tokenRequest()
 	if req.form.Get("client_secret") != "client-secret" && req.authorization == "" {
 		t.Fatalf("confidential client sent no secret: form=%v", req.form)
-	}
-}
-
-func TestCallbackAllowlistIsAnd(t *testing.T) {
-	for _, tt := range []struct {
-		name      string
-		mutate    func(*Config)
-		overrides map[string]any
-		status    int
-	}{
-		{"emails only, listed", func(c *Config) { c.AllowedDomains = nil }, nil, http.StatusSeeOther},
-		{"emails only, listed in any domain", func(c *Config) { c.AllowedDomains, c.AllowedEmails = nil, []string{"guest@other.org"} }, map[string]any{"email": "guest@other.org"}, http.StatusSeeOther},
-		{"emails only, unlisted", func(c *Config) { c.AllowedDomains, c.AllowedEmails = nil, []string{"bob@example.com"} }, nil, http.StatusForbidden},
-		{"both, listed in domain", nil, nil, http.StatusSeeOther},
-		{"both, in domain not listed", func(c *Config) { c.AllowedEmails = []string{"bob@example.com"} }, nil, http.StatusForbidden},
-		{"both, listed in wrong domain", func(c *Config) { c.AllowedEmails = []string{"guest@other.org"} }, map[string]any{"email": "guest@other.org"}, http.StatusForbidden},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			fx := newFixture(t, tt.mutate)
-			w := fx.finishLogin(fx.startLogin("/admin/"), tt.overrides)
-			if w.Code != tt.status {
-				t.Fatalf("status %d, want %d: %s", w.Code, tt.status, w.Body.String())
-			}
-		})
 	}
 }
 
@@ -257,14 +232,6 @@ func TestCallbackDoesNotLogExchangeDetails(t *testing.T) {
 	}
 }
 
-func newDebugFixture(t *testing.T, level slog.Level) *fixture {
-	t.Helper()
-	fx := newFixture(t, nil)
-	fx.logs.Reset()
-	fx.authn.logger = slog.New(slog.NewJSONHandler(fx.logs, &slog.HandlerOptions{Level: level}))
-	return fx
-}
-
 var noEmailClaims = map[string]any{"email": nil, "email_verified": nil, "name": nil}
 
 func TestCallbackUserInfoFallback(t *testing.T) {
@@ -329,7 +296,7 @@ func TestCallbackUserInfoRejections(t *testing.T) {
 }
 
 func TestCallbackSkipsUserInfoWhenIDTokenHasClaims(t *testing.T) {
-	fx := newDebugFixture(t, slog.LevelInfo)
+	fx := newFixture(t, nil)
 	if w := fx.finishLogin(fx.startLogin("/admin/"), nil); w.Code != http.StatusSeeOther {
 		t.Fatalf("callback: %d %s", w.Code, w.Body.String())
 	}

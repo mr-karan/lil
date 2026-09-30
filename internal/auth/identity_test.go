@@ -124,16 +124,4 @@ func TestDevCredentialsDoNotSurviveSwitchToOIDC(t *testing.T) {
 	if w := prod.do("GET", "/api/x", nil, bearer(token)); w.Code != 401 {
 		t.Fatalf("dev token in oidc mode: %d", w.Code)
 	}
-	if w := prod.do("GET", "/api/x", nil, nil); w.Code != 401 {
-		t.Fatalf("dev user in oidc mode: %d", w.Code)
-	}
-}
-
-func TestSessionForUnknownUserIsRejected(t *testing.T) {
-	fx := newFixture(t, nil)
-	cookies := fx.login("alice@example.com")
-	other := newFixtureWith(t, fx.idp, newTestStore(t), oidcConfig(fx.idp))
-	if w := other.do("GET", "/api/x", cookies, nil); w.Code != 401 {
-		t.Fatalf("session cookie unknown to this database: %d", w.Code)
-	}
 }

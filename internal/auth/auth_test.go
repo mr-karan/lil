@@ -123,6 +123,7 @@ func TestAdmit(t *testing.T) {
 		{"google both: listed, hd absent", googleBoth, "alice@example.com", "", false},
 		{"google both: listed, hd mismatched", googleBoth, "alice@example.com", "evil.com", false},
 		{"google both: hd matches, not listed", googleBoth, "bob@example.com", "example.com", false},
+		{"empty allowlist admits nobody", Config{}, "alice@example.com", "", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := tt.cfg.admit(tt.email, tt.hd); got != tt.want {
@@ -184,26 +185,5 @@ func TestUnauthenticatedResponses(t *testing.T) {
 		if w := fx.do("GET", "/api/x", nil, map[string]string{"Authorization": header}); w.Code != 401 {
 			t.Fatalf("Authorization %q: %d", header, w.Code)
 		}
-	}
-}
-
-func TestEmailAllowed(t *testing.T) {
-	both := Config{AllowedDomains: []string{"example.com"}, AllowedEmails: []string{"alice@example.com", "guest@other.org"}}
-	for email, want := range map[string]bool{
-		"alice@example.com": true,
-		"ALICE@example.com": true,
-		"bob@example.com":   false,
-		"guest@other.org":   false,
-	} {
-		if got := both.emailAllowed(email); got != want {
-			t.Errorf("emailAllowed(%q) = %v, want %v", email, got, want)
-		}
-	}
-	emailsOnly := Config{AllowedEmails: []string{"guest@other.org"}}
-	if !emailsOnly.emailAllowed("guest@other.org") || emailsOnly.emailAllowed("bob@other.org") {
-		t.Error("emails-only list must be strict")
-	}
-	if (Config{}).emailAllowed("alice@example.com") {
-		t.Error("an empty allowlist must admit nobody")
 	}
 }

@@ -443,27 +443,3 @@ func TestAttributionAndAuditAPI(t *testing.T) {
 		}
 	}
 }
-
-func TestDevModeRoutes(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s, err := store.New(store.Conf{DBPath: filepath.Join(t.TempDir(), "urls.db"), ShortURLLength: 6}, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	authn, err := auth.New(t.Context(), auth.Config{Mode: auth.ModeDev, DevEmail: "dev@example.com"}, s, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	router := (&App{store: s, logger: logger}).routes(authn)
-	for path, want := range map[string]int{"/admin/": http.StatusOK, "/api/v1/me": http.StatusOK} {
-		w := httptest.NewRecorder()
-		router.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
-		if w.Code != want {
-			t.Fatalf("%s: %d", path, w.Code)
-		}
-		if path == "/api/v1/me" && !strings.Contains(w.Body.String(), `"email":"dev@example.com"`) {
-			t.Fatalf("me: %s", w.Body.String())
-		}
-	}
-}

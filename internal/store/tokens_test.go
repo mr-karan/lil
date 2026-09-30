@@ -60,29 +60,6 @@ func TestAPITokenLifecycle(t *testing.T) {
 	}
 }
 
-func TestDisabledUserTokenFails(t *testing.T) {
-	s := newTestStore(t)
-	ctx := t.Context()
-	alice := newActor(t, s)
-	bob := Actor{UserID: newUser(t, s, "bob@example.com").ID}
-	plaintext, _, err := s.CreateAPIToken(ctx, bob, "laptop")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetUserDisabled(ctx, alice, bob.UserID, true); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.AuthenticateAPIToken(ctx, plaintext); !errors.Is(err, ErrUnauthorized) {
-		t.Fatal(err)
-	}
-	if err := s.SetUserDisabled(ctx, alice, bob.UserID, false); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.AuthenticateAPIToken(ctx, plaintext); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("token restored by enable: %v", err)
-	}
-}
-
 func TestDisableRevokesTokensAndBumpsEpoch(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
@@ -102,6 +79,9 @@ func TestDisableRevokesTokensAndBumpsEpoch(t *testing.T) {
 	}
 	if err := s.SetUserDisabled(ctx, alice, bob.UserID, true); err != nil {
 		t.Fatal(err)
+	}
+	if _, _, err := s.AuthenticateAPIToken(ctx, bobToken); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("token of a disabled user: %v", err)
 	}
 	if err := s.SetUserDisabled(ctx, alice, bob.UserID, false); err != nil {
 		t.Fatal(err)
