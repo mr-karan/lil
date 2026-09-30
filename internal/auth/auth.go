@@ -220,9 +220,8 @@ var errUnauthenticated = errors.New("unauthenticated")
 // token never falls back to the session.
 func (a *Authenticator) identify(r *http.Request) (store.Actor, store.User, error) {
 	ctx := r.Context()
-	if values := r.Header.Values("Authorization"); len(values) > 0 {
-		scheme, token, _ := strings.Cut(values[0], " ")
-		if len(values) != 1 || !strings.EqualFold(scheme, "Bearer") || token == "" {
+	if token, ok := bearerToken(r); ok {
+		if token == "" {
 			return store.Actor{}, store.User{}, errUnauthenticated
 		}
 		actor, user, err := a.store.AuthenticateAPIToken(ctx, token)
@@ -257,6 +256,18 @@ func (a *Authenticator) identify(r *http.Request) (store.Actor, store.User, erro
 		return store.Actor{}, store.User{}, errUnauthenticated
 	}
 	return store.Actor{UserID: user.ID}, user, nil
+}
+
+// bearerToken reports whether the request carries an API token. Other
+// Authorization schemes are ignored: browsers keep sending cached Basic
+// credentials to a site long after it stopped asking for them.
+func bearerToken(r *http.Request) (string, bool) {
+	for _, value := range r.Header.Values("Authorization") {
+		if scheme, token, _ := strings.Cut(value, " "); strings.EqualFold(scheme, "Bearer") {
+			return strings.TrimSpace(token), true
+		}
+	}
+	return "", false
 }
 
 func (a *Authenticator) identifyDevUser(ctx context.Context) (store.Actor, store.User, error) {

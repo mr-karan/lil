@@ -391,3 +391,24 @@ func TestCallbackSkipsUserInfoWhenIDTokenHasClaims(t *testing.T) {
 		t.Fatalf("userinfo called %d times", n)
 	}
 }
+
+// Browsers keep sending cached Basic credentials to a site that once asked for
+// them. Such a header must not hide a valid session, or sign-in loops forever.
+func TestSessionSurvivesStaleBasicAuthHeader(t *testing.T) {
+	fx := newFixture(t, nil)
+	w := fx.finishLogin(fx.startLogin("/admin/"), noEmailClaims)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("callback: %d %s", w.Code, w.Body.String())
+	}
+	cookies := w.Result().Cookies()
+	basic := map[string]string{"Authorization": "Basic YWRtaW46cGFzc3dvcmQ="}
+	if w := fx.do("GET", "/admin/", cookies, basic); w.Code != http.StatusOK {
+		t.Fatalf("/admin/ with session and stale Basic header: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	if w := fx.do("GET", "/api/x", cookies, basic); w.Code != http.StatusOK {
+		t.Fatalf("/api/x with session and stale Basic header: %d", w.Code)
+	}
+	if w := fx.do("GET", "/api/x", nil, basic); w.Code != http.StatusUnauthorized {
+		t.Fatalf("Basic header alone must not authenticate: %d", w.Code)
+	}
+}
